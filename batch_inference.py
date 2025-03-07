@@ -127,7 +127,7 @@ def _parse_args():
     )
 
     parser.add_argument(
-        "--sampling_steps",
+        "--sampling-steps",
         type=int,
         default=30,
         help="inference sampling steps"
