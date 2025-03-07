@@ -876,7 +876,7 @@ if __name__ == "__main__":
             image_to_continue=images,
             video_to_continue=None,
             max_frames=9,
-            RIFLEx_setting=1,
+            RIFLEx_setting=0,
             state=state
     ):
         print(out)
