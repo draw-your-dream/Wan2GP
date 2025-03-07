@@ -774,6 +774,7 @@ def generate_video(
     gen_in_progress = False
 
 if __name__ == "__main__":
+    from PIL import Image
     inp_img = Image.open("examples/i2v_input.JPG")
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
     state = {}
