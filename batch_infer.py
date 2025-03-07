@@ -833,6 +833,7 @@ def generate_video(
                     yield f"Total Generation Time: {end_time - start_time:.1f}s"
             seed += 1
         prompt_idx += 1
+        seed = random.randint(0, 999999999)
 
     if temp_filename != None and os.path.isfile(temp_filename):
         os.remove(temp_filename)
