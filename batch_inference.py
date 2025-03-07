@@ -20,7 +20,7 @@ import gc
 import traceback
 import math
 import asyncio
-
+from tqdm import tqdm
 
 def _parse_args():
     parser = argparse.ArgumentParser(
