@@ -126,6 +126,20 @@ def _parse_args():
         help="batch infer input directory"
     )
 
+    parser.add_argument(
+        "--sampling_steps",
+        type=int,
+        default=30,
+        help="inference sampling steps"
+    )
+
+    parser.add_argument(
+        "--repeat-generation",
+        type=int,
+        default=1,
+        help="inference repeat generation"
+    )
+
     args = parser.parse_args()
 
     return args
@@ -789,6 +803,8 @@ def generate_video(
 if __name__ == "__main__":
     from PIL import Image
 
+    sampling_steps = args.sampling_steps
+    repeat_generation = args.repeat_generation
     batch_input_dir = args.batch_input_dir
     if not os.path.isdir(batch_input_dir):
         raise ValueError(f"batch_input_dir not exists: {batch_input_dir}")
@@ -815,6 +831,8 @@ if __name__ == "__main__":
                 # set the prompt to empty string if the prompt file not exists
                 prompts.append("a photo")
 
+    print(f"input images size: {len(images)}")
+
     # join prompts to a single string split by "\n"
     prompt = "\n".join(prompts)
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
@@ -825,11 +843,11 @@ if __name__ == "__main__":
             resolution="720x1280",
             video_length=81,
             seed=-1,
-            num_inference_steps=30,
+            num_inference_steps=sampling_steps,
             guidance_scale=5.0,
             flow_shift=default_flow_shift,
             embedded_guidance_scale=6.0,
-            repeat_generation=1,
+            repeat_generation=repeat_generation,
             tea_cache=0.03,
             tea_cache_start_step_perc=20,
             loras_choices=default_loras_choices,
