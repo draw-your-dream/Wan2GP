@@ -801,11 +801,11 @@ def generate_video(
 
                 time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
                 if os.name == 'nt':
-                    file_name = f"{time_flag}_seed_{seed}_{prompt[:50].replace('/', '').strip()}.mp4".replace(':',
+                    file_name = f"{time_flag}_step_{num_inference_steps}_seed_{seed}_{prompt[:50].replace('/', '').strip()}.mp4".replace(':',
                                                                                                              ' ').replace(
                         '\\', ' ')
                 else:
-                    file_name = f"{time_flag}_seed_{seed}_{prompt[:100].replace('/', '').strip()}.mp4".replace(':',
+                    file_name = f"{time_flag}_step_{num_inference_steps}_seed_{seed}_{prompt[:100].replace('/', '').strip()}.mp4".replace(':',
                                                                                                               ' ').replace(
                         '\\', ' ')
 
