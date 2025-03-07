@@ -216,7 +216,7 @@ else:
     lora_dir = args.lora_dir
     lora_preselected_preset = args.lora_preset
 
-default_tea_cache = 0
+# default_tea_cache = 0
 # if args.fast : #or args.fastest
 #     transformer_filename_t2v = transformer_choices_t2v[2]
 #     attention_mode="sage2" if "sage2" in attention_modes_supported else "sage"
@@ -818,7 +818,7 @@ def generate_video(
 
 if __name__ == "__main__":
     from PIL import Image
-    default_prompt = "A close-up shot highlights. High quality, ultrarealistic detail and breath-taking movie-like camera shot."
+    default_prompt = "High quality, ultrarealistic detail and breath-taking movie-like camera shot."
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     resolution = "720x1280"
 
