@@ -140,6 +140,13 @@ def _parse_args():
         help="inference repeat generation"
     )
 
+    parser.add_argument(
+        "--device-id",
+        type=int,
+        default=0,
+        help="select gpu id"
+    )
+
     args = parser.parse_args()
 
     return args
@@ -149,6 +156,8 @@ attention_modes_supported = get_attention_modes()
 
 args = _parse_args()
 args.flow_reverse = True
+
+device_id = int(args.device_id)
 
 preload = int(args.preload)
 force_profile_no = int(args.profile)
@@ -351,7 +360,7 @@ def load_t2v_model(model_filename, value):
     wan_model = wan.WanT2V(
         config=cfg,
         checkpoint_dir="ckpts",
-        device_id=0,
+        device_id=device_id,
         rank=0,
         t5_fsdp=False,
         dit_fsdp=False,
@@ -372,7 +381,7 @@ def load_i2v_model(model_filename, value):
         wan_model = wan.WanI2V(
             config=cfg,
             checkpoint_dir="ckpts",
-            device_id=0,
+            device_id=device_id,
             rank=0,
             t5_fsdp=False,
             dit_fsdp=False,
@@ -390,7 +399,7 @@ def load_i2v_model(model_filename, value):
         wan_model = wan.WanI2V(
             config=cfg,
             checkpoint_dir="ckpts",
-            device_id=0,
+            device_id=device_id,
             rank=0,
             t5_fsdp=False,
             dit_fsdp=False,
@@ -842,7 +851,7 @@ def generate_video(
 
 if __name__ == "__main__":
     from PIL import Image
-    default_prompt = "High quality"
+    default_prompt = "High quality, ultrarealistic detail"
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     resolution = "720*1280"
 
