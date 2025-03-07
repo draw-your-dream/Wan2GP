@@ -671,6 +671,7 @@ def generate_video(
     save_path = os.path.join(os.getcwd(), "infer_outputs")
     os.makedirs(save_path, exist_ok=True)
     video_no = 0
+    prompt_idx = 0
     total_video = repeat_generation * len(prompts)
     abort = False
     start_time = time.time()
@@ -690,7 +691,7 @@ def generate_video(
 
                 trans.teacache_cache_device = "cuda" if profile == 3 or profile == 1 else "cpu"
 
-            idx = video_no % len(prompts)
+
             video_no += 1
             status = f"Video {video_no}/{total_video}"
             progress(0, desc=status + " - Encoding Prompt")
@@ -704,13 +705,13 @@ def generate_video(
             try:
                 if use_image2video:
 
-                    current_image_filename = image_to_continue_filename[idx]
-                    current_image = image_to_continue[idx]
+                    current_image_filename = image_to_continue_filename[prompt_idx]
+                    current_image = image_to_continue[prompt_idx]
                     frame_num = (video_length // 4) * 4 + 1
                     max_area = MAX_AREA_CONFIGS[resolution]
                     print("---i2v generate debug info---")
                     print(f"gen_video_no: {video_no}")
-                    print(f"input_image_idx: {idx}")
+                    print(f"input_image_idx: {prompt_idx}")
                     print(f"input_image_filename: {current_image_filename}")
                     print(f"prompt: {prompt}")
                     print(f"frame_num: {frame_num}")
@@ -831,6 +832,7 @@ def generate_video(
                     end_time = time.time()
                     yield f"Total Generation Time: {end_time - start_time:.1f}s"
             seed += 1
+        prompt_idx += 1
 
     if temp_filename != None and os.path.isfile(temp_filename):
         os.remove(temp_filename)
