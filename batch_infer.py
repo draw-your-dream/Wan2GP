@@ -702,8 +702,9 @@ def generate_video(
             current_image_filename = None
             try:
                 if use_image2video:
-                    current_image_filename = image_to_continue_filename[video_no - 1]
-                    current_image = image_to_continue[video_no - 1]
+                    idx = (video_no % len(prompts)) - 1
+                    current_image_filename = image_to_continue_filename[idx]
+                    current_image = image_to_continue[idx]
                     frame_num = (video_length // 4) * 4 + 1
                     max_area = MAX_AREA_CONFIGS[resolution]
                     print("---i2v generate debug info---")
