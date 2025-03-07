@@ -119,6 +119,13 @@ def _parse_args():
         help="vae config mode"
     )
 
+    parser.add_argument(
+        "--batch-input-dir",
+        type=str,
+        default="./batch_inputs",
+        help="batch infer input directory"
+    )
+
     args = parser.parse_args()
 
     return args
@@ -782,11 +789,38 @@ def generate_video(
 if __name__ == "__main__":
     from PIL import Image
 
-    inp_img = Image.open("examples/i2v_input.JPG")
+    batch_input_dir = args.batch_input_dir
+    if not os.path.isdir(batch_input_dir):
+        raise ValueError(f"batch_input_dir not exists: {batch_input_dir}")
+
+    # load images and prompts from batch_input_dir, which image and prompt file name should be paired
+    images = []
+    prompts = []
+    for file in os.listdir(batch_input_dir):
+        if file.lower().endswith(".jpg") or file.lower().endswith(".jpeg") or file.lower().endswith(".png"):
+            # get the image file name
+            image_file = os.path.join(batch_input_dir, file)
+            images.append((Image.open(image_file), image_file))
+            # get the prompt file name
+            prompt_file = file.lower().replace(".jpg", ".txt").replace(".jpeg", ".txt").replace(".png", ".txt")
+            # if the prompt file exists, read the prompt from the file
+            if os.path.isfile(os.path.join(batch_input_dir, prompt_file)):
+                with open(os.path.join(batch_input_dir, prompt_file), "r", encoding="utf-8") as reader:
+                    prompt = reader.read()
+                    # if prompt is empty, append "a photo" to prompts
+                    if len(prompt.strip()) == 0:
+                        prompts.append("a photo")
+                    prompts.append(prompt)
+            else:
+                # set the prompt to empty string if the prompt file not exists
+                prompts.append("a photo")
+
+    # join prompts to a single string split by "\n"
+    prompt = "\n".join(prompts)
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
     state = {}
     for out in generate_video(
-            prompt="A cat swimming in the water",
+            prompt=prompt,
             negative_prompt="deformation, a poor composition and deformed video, bad teeth, bad eyes, bad limbs",
             resolution="720x1280",
             video_length=81,
@@ -800,7 +834,7 @@ if __name__ == "__main__":
             tea_cache_start_step_perc=20,
             loras_choices=default_loras_choices,
             loras_mult_choices=default_loras_multis_str,
-            image_to_continue=[(inp_img,inp_img)],
+            image_to_continue=images,
             video_to_continue=None,
             max_frames=9,
             RIFLEx_setting=1,
