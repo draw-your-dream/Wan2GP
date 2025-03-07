@@ -521,7 +521,7 @@ def generate_video(
         raise Exception(
             f"You have selected attention mode '{attention_mode}'. However it is not installed on your system. You should either install it or switch to the default 'sdpa' attention.")
 
-    width, height = resolution.split("x")
+    width, height = resolution.split("*")
     width, height = int(width), int(height)
 
     if use_image2video:
@@ -704,11 +704,26 @@ def generate_video(
                 if use_image2video:
                     current_image_filename = image_to_continue_filename[video_no - 1]
                     current_image = image_to_continue[video_no - 1]
+                    frame_num = (video_length // 4) * 4 + 1
+                    max_area = MAX_AREA_CONFIGS[resolution]
+                    print("---i2v generate debug info---")
+                    print(f"gen_video_no: {video_no}")
+                    print(f"input_image_filename: {current_image_filename}")
+                    print(f"prompt: {prompt}")
+                    print(f"frame_num: {frame_num}")
+                    print(f"max_area: {max_area}")
+                    print(f"flow_shift: {flow_shift}")
+                    print(f"sampling_steps: {num_inference_steps}")
+                    print(f"guidance_scale: {guidance_scale}")
+                    print(f"negative_prompt: {negative_prompt}")
+                    print(f"seed: {seed}")
+                    print(f"offload_model: False")
+                    print("---end---")
                     samples = wan_model.generate(
                         prompt,
                         current_image,
-                        frame_num=(video_length // 4) * 4 + 1,
-                        max_area=MAX_AREA_CONFIGS[resolution],
+                        frame_num=frame_num,
+                        max_area=max_area,
                         shift=flow_shift,
                         sampling_steps=num_inference_steps,
                         guide_scale=guidance_scale,
@@ -823,7 +838,7 @@ if __name__ == "__main__":
     from PIL import Image
     default_prompt = "High quality"
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
-    resolution = "720x1280"
+    resolution = "720*1280"
 
     sampling_steps = args.sampling_steps
     repeat_generation = args.repeat_generation
