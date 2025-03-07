@@ -122,7 +122,7 @@ def _parse_args():
     parser.add_argument(
         "--batch-input-dir",
         type=str,
-        default="./batch_inputs",
+        default="./infer_inputs",
         help="batch infer input directory"
     )
 
@@ -565,21 +565,28 @@ def generate_video(
         return
     prompts = prompt.replace("\r", "").split("\n")
 
+    image_to_continue_filename = []
+
     if use_image2video:
         if image_to_continue is not None:
             if isinstance(image_to_continue, list):
                 image_to_continue = [tup[0] for tup in image_to_continue]
+                image_to_continue_filename = [tup[1] for tup in image_to_continue]
             else:
                 image_to_continue = [image_to_continue]
+                image_to_continue_filename = ["none"]
             if len(prompts) >= len(image_to_continue):
                 if len(prompts) % len(image_to_continue) != 0:
                     raise Exception(
                         "If there are more text prompts than input images the number of text prompts should be dividable by the number of images")
                 rep = len(prompts) // len(image_to_continue)
                 new_image_to_continue = []
+                new_image_to_continue_filename = []
                 for i, _ in enumerate(prompts):
                     new_image_to_continue.append(image_to_continue[i // rep])
+                    new_image_to_continue_filename.append(image_to_continue_filename[i // rep])
                 image_to_continue = new_image_to_continue
+                image_to_continue_filename = new_image_to_continue_filename
             else:
                 if len(image_to_continue) % len(prompts) != 0:
                     raise Exception(
@@ -687,11 +694,14 @@ def generate_video(
             gc.collect()
             torch.cuda.empty_cache()
             wan_model._interrupt = False
+            current_image_filename = None
             try:
                 if use_image2video:
+                    current_image_filename = image_to_continue_filename[video_no - 1]
+                    current_image = image_to_continue[video_no - 1]
                     samples = wan_model.generate(
                         prompt,
-                        image_to_continue[video_no - 1],
+                        current_image,
                         frame_num=(video_length // 4) * 4 + 1,
                         max_area=MAX_AREA_CONFIGS[resolution],
                         shift=flow_shift,
@@ -777,6 +787,10 @@ def generate_video(
                     file_name = f"{time_flag}_seed{seed}_{prompt[:100].replace('/', '').strip()}.mp4".replace(':',
                                                                                                               ' ').replace(
                         '\\', ' ')
+
+                if current_image_filename is not None:
+                    file_name = f"{current_image_filename}_{file_name}"
+
                 video_path = os.path.join(os.getcwd(), "infer_outputs", file_name)
                 cache_video(
                     tensor=sample[None],
@@ -816,20 +830,22 @@ if __name__ == "__main__":
         if file.lower().endswith(".jpg") or file.lower().endswith(".jpeg") or file.lower().endswith(".png"):
             # get the image file name
             image_file = os.path.join(batch_input_dir, file)
-            images.append((Image.open(image_file), image_file))
+            # get the image file name without path and extension
+            image_file_without_ext, _ = os.path.splitext(os.path.basename(image_file))
+            images.append((Image.open(image_file), image_file_without_ext))
             # get the prompt file name
-            prompt_file = file.lower().replace(".jpg", ".txt").replace(".jpeg", ".txt").replace(".png", ".txt")
+            prompt_file = os.path.join(batch_input_dir, f"{image_file_without_ext}.txt")
             # if the prompt file exists, read the prompt from the file
             if os.path.isfile(os.path.join(batch_input_dir, prompt_file)):
                 with open(os.path.join(batch_input_dir, prompt_file), "r", encoding="utf-8") as reader:
                     prompt = reader.read()
                     # if prompt is empty, append "a photo" to prompts
                     if len(prompt.strip()) == 0:
-                        prompts.append("a photo")
+                        prompts.append("amazing")
                     prompts.append(prompt)
             else:
                 # set the prompt to empty string if the prompt file not exists
-                prompts.append("a photo")
+                prompts.append("amazing")
 
     print(f"input images size: {len(images)}")
 
