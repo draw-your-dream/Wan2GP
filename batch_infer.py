@@ -656,7 +656,7 @@ def generate_video(
     trans = wan_model.model
     trans.enable_teacache = tea_cache > 0
     print("---debug info---")
-    print(f"attn mode: {attn}, device_mem_capacity: {device_mem_capacity}, VAE_tile_size: {VAE_tile_size}")
+    print(f"attn mode: {attn}, device_mem_capacity: {device_mem_capacity}, VAE_tile_size: {VAE_tile_size}, vae_config: {use_vae_config}")
     print(f"enable_RIFLEx: {enable_RIFLEx}")
     print(f"TeaCache enable: {trans.enable_teacache}, TeaCache threshold: {tea_cache}, TeaCache start step: {tea_cache_start_step_perc}%")
     print("---end---")
@@ -821,7 +821,7 @@ def generate_video(
 
 if __name__ == "__main__":
     from PIL import Image
-    default_prompt = "High quality, ultrarealistic detail and breath-taking movie-like camera shot."
+    default_prompt = "High quality, ultrarealistic detail"
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     resolution = "720x1280"
 
