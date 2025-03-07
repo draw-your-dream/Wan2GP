@@ -22,6 +22,7 @@ import math
 import asyncio
 from tqdm import tqdm
 
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="Generate a video from a text prompt or image")
@@ -281,6 +282,7 @@ def extract_preset(lset_name, loras):
     loras_mult_choices = lset["loras_mult"]
     return loras_choices, loras_mult_choices
 
+
 def setup_loras(pipe, lora_dir, lora_preselected_preset, split_linear_modules_map=None):
     loras = []
     loras_names = []
@@ -410,21 +412,24 @@ wan_model, offloadobj, loras, loras_names, default_loras_choices, default_loras_
     use_image2video, lora_dir, lora_preselected_preset)
 gen_in_progress = False
 
+
 def get_auto_attention():
-    for attn in ["sage2","sage","sdpa"]:
+    for attn in ["sage2", "sage", "sdpa"]:
         if attn in attention_modes_supported:
             return attn
     return "sdpa"
 
+
 def get_default_flow(model_filename):
     return 3.0 if "480p" in model_filename else 5.0
 
-def expand_slist(slist, num_inference_steps ):
-    new_slist= []
-    inc =  len(slist) / num_inference_steps
+
+def expand_slist(slist, num_inference_steps):
+    new_slist = []
+    inc = len(slist) / num_inference_steps
     pos = 0
     for i in range(num_inference_steps):
-        new_slist.append(slist[ int(pos)])
+        new_slist.append(slist[int(pos)])
         pos += inc
     return new_slist
 
@@ -773,31 +778,34 @@ def generate_video(
         os.remove(temp_filename)
     gen_in_progress = False
 
+
 if __name__ == "__main__":
     from PIL import Image
+
     inp_img = Image.open("examples/i2v_input.JPG")
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
     state = {}
-    generate_video(
-        prompt="A cat swimming in the water",
-        negative_prompt="deformation, a poor composition and deformed video, bad teeth, bad eyes, bad limbs",
-        resolution="720x1280",
-        video_length=81,
-        seed=-1,
-        num_inference_steps=30,
-        guidance_scale=5.0,
-        flow_shift=default_flow_shift,
-        embedded_guidance_scale=6.0,
-        repeat_generation=1,
-        tea_cache=0.03,
-        tea_cache_start_step_perc=20,
-        loras_choices=default_loras_choices,
-        loras_mult_choices=default_loras_multis_str,
-        image_to_continue=[inp_img],
-        video_to_continue=None,
-        max_frames=9,
-        RIFLEx_setting=1,
-        state=state
-    )
+    for out in generate_video(
+            prompt="A cat swimming in the water",
+            negative_prompt="deformation, a poor composition and deformed video, bad teeth, bad eyes, bad limbs",
+            resolution="720x1280",
+            video_length=81,
+            seed=-1,
+            num_inference_steps=30,
+            guidance_scale=5.0,
+            flow_shift=default_flow_shift,
+            embedded_guidance_scale=6.0,
+            repeat_generation=1,
+            tea_cache=0.03,
+            tea_cache_start_step_perc=20,
+            loras_choices=default_loras_choices,
+            loras_mult_choices=default_loras_multis_str,
+            image_to_continue=[inp_img],
+            video_to_continue=None,
+            max_frames=9,
+            RIFLEx_setting=1,
+            state=state
+    ):
+        print(out)
 
     print(state)
