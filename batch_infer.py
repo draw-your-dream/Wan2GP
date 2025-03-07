@@ -690,6 +690,7 @@ def generate_video(
 
                 trans.teacache_cache_device = "cuda" if profile == 3 or profile == 1 else "cpu"
 
+            idx = video_no % len(prompts)
             video_no += 1
             status = f"Video {video_no}/{total_video}"
             progress(0, desc=status + " - Encoding Prompt")
@@ -702,13 +703,14 @@ def generate_video(
             current_image_filename = None
             try:
                 if use_image2video:
-                    idx = (video_no % len(prompts)) - 1
+
                     current_image_filename = image_to_continue_filename[idx]
                     current_image = image_to_continue[idx]
                     frame_num = (video_length // 4) * 4 + 1
                     max_area = MAX_AREA_CONFIGS[resolution]
                     print("---i2v generate debug info---")
                     print(f"gen_video_no: {video_no}")
+                    print(f"input_image_idx: {idx}")
                     print(f"input_image_filename: {current_image_filename}")
                     print(f"prompt: {prompt}")
                     print(f"frame_num: {frame_num}")
