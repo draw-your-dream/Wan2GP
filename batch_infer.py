@@ -651,12 +651,15 @@ def generate_video(
     state["selected"] = 0
 
     enable_RIFLEx = RIFLEx_setting == 0 and video_length > (6 * 16) or RIFLEx_setting == 1
-    # VAE Tiling
-    device_mem_capacity = torch.cuda.get_device_properties(0).total_memory / 1048576
 
     # TeaCache
     trans = wan_model.model
     trans.enable_teacache = tea_cache > 0
+    print("---debug info---")
+    print(f"attn mode: {attn}, device_mem_capacity: {device_mem_capacity}, VAE_tile_size: {VAE_tile_size}")
+    print(f"enable_RIFLEx: {enable_RIFLEx}")
+    print(f"TeaCache enable: {trans.enable_teacache}, TeaCache threshold: {tea_cache}, TeaCache start step: {tea_cache_start_step_perc}%")
+    print("---end---")
 
     import random
     if seed == None or seed < 0:
