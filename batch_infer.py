@@ -570,8 +570,8 @@ def generate_video(
     if use_image2video:
         if image_to_continue is not None:
             if isinstance(image_to_continue, list):
-                image_to_continue = [tup[0] for tup in image_to_continue]
                 image_to_continue_filename = [tup[1] for tup in image_to_continue]
+                image_to_continue = [tup[0] for tup in image_to_continue]
             else:
                 image_to_continue = [image_to_continue]
                 image_to_continue_filename = ["none"]
