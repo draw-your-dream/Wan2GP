@@ -816,6 +816,9 @@ def generate_video(
 
 if __name__ == "__main__":
     from PIL import Image
+    default_prompt = "A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside. High quality, ultrarealistic detail and breath-taking movie-like camera shot."
+    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+    resolution = "720x1280"
 
     sampling_steps = args.sampling_steps
     repeat_generation = args.repeat_generation
@@ -841,11 +844,11 @@ if __name__ == "__main__":
                     prompt = reader.read()
                     # if prompt is empty, append "a photo" to prompts
                     if len(prompt.strip()) == 0:
-                        prompts.append("amazing")
+                        prompts.append(default_prompt)
                     prompts.append(prompt)
             else:
                 # set the prompt to empty string if the prompt file not exists
-                prompts.append("amazing")
+                prompts.append(default_prompt)
 
     print(f"input images size: {len(images)}")
 
@@ -855,8 +858,8 @@ if __name__ == "__main__":
     state = {}
     for out in generate_video(
             prompt=prompt,
-            negative_prompt="deformation, a poor composition and deformed video, bad teeth, bad eyes, bad limbs",
-            resolution="720x1280",
+            negative_prompt=negative_prompt,
+            resolution=resolution,
             video_length=81,
             seed=-1,
             num_inference_steps=sampling_steps,
