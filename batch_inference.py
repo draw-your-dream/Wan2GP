@@ -635,7 +635,7 @@ def generate_video(
     file_list = []
     state["file_list"] = file_list
     from einops import rearrange
-    save_path = os.path.join(os.getcwd(), "gradio_outputs")
+    save_path = os.path.join(os.getcwd(), "infer_outputs")
     os.makedirs(save_path, exist_ok=True)
     video_no = 0
     total_video = repeat_generation * len(prompts)
@@ -756,7 +756,7 @@ def generate_video(
                     file_name = f"{time_flag}_seed{seed}_{prompt[:100].replace('/', '').strip()}.mp4".replace(':',
                                                                                                               ' ').replace(
                         '\\', ' ')
-                video_path = os.path.join(os.getcwd(), "gradio_outputs", file_name)
+                video_path = os.path.join(os.getcwd(), "infer_outputs", file_name)
                 cache_video(
                     tensor=sample[None],
                     save_file=video_path,
