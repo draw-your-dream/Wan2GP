@@ -840,7 +840,8 @@ if __name__ == "__main__":
             image_file = os.path.join(batch_input_dir, file)
             # get the image file name without path and extension
             image_file_without_ext, _ = os.path.splitext(os.path.basename(image_file))
-            images.append((Image.open(image_file), image_file_without_ext))
+            img = Image.open(image_file).convert("RGB")
+            images.append((img, image_file_without_ext))
             # get the prompt file name
             prompt_file = os.path.join(batch_input_dir, f"{image_file_without_ext}.txt")
             # if the prompt file exists, read the prompt from the file
