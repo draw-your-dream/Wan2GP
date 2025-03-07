@@ -800,7 +800,7 @@ if __name__ == "__main__":
             tea_cache_start_step_perc=20,
             loras_choices=default_loras_choices,
             loras_mult_choices=default_loras_multis_str,
-            image_to_continue=[inp_img],
+            image_to_continue=[(inp_img,inp_img)],
             video_to_continue=None,
             max_frames=9,
             RIFLEx_setting=1,
