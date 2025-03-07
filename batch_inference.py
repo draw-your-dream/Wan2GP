@@ -476,7 +476,7 @@ def generate_video(
         max_frames,
         RIFLEx_setting,
         state,
-        progress=tqdm.tqdm  # track_tqdm= True
+        progress=tqdm  # track_tqdm= True
 
 ):
     from PIL import Image
