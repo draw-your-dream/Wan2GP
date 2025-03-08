@@ -880,8 +880,8 @@ if __name__ == "__main__":
             # get the prompt file name
             prompt_file = os.path.join(batch_input_dir, f"{image_file_without_ext}.txt")
             # if the prompt file exists, read the prompt from the file
-            if os.path.isfile(os.path.join(batch_input_dir, prompt_file)):
-                with open(os.path.join(batch_input_dir, prompt_file), "r", encoding="utf-8") as reader:
+            if os.path.isfile(prompt_file):
+                with open(prompt_file, "r", encoding="utf-8") as reader:
                     prompt = reader.read()
                     # if prompt is empty, append "a photo" to prompts
                     if len(prompt.strip()) == 0:
