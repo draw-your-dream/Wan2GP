@@ -670,9 +670,11 @@ def generate_video(
     trans = wan_model.model
     trans.enable_teacache = tea_cache > 0
     print("---debug info---")
-    print(f"attn mode: {attn}, device_mem_capacity: {device_mem_capacity}, VAE_tile_size: {VAE_tile_size}, vae_config: {use_vae_config}")
+    print(
+        f"attn mode: {attn}, device_mem_capacity: {device_mem_capacity}, VAE_tile_size: {VAE_tile_size}, vae_config: {use_vae_config}")
     print(f"enable_RIFLEx: {enable_RIFLEx}")
-    print(f"TeaCache enable: {trans.enable_teacache}, TeaCache threshold: {tea_cache}, TeaCache start step: {tea_cache_start_step_perc}%")
+    print(
+        f"TeaCache enable: {trans.enable_teacache}, TeaCache threshold: {tea_cache}, TeaCache start step: {tea_cache_start_step_perc}%")
     print("---end---")
 
     import random
@@ -704,7 +706,6 @@ def generate_video(
                 trans.previous_modulated_input_cond = None
 
                 trans.teacache_cache_device = "cuda" if profile == 3 or profile == 1 else "cpu"
-
 
             video_no += 1
             status = f"Video {video_no}/{total_video}"
@@ -818,13 +819,13 @@ def generate_video(
 
                 time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
                 if os.name == 'nt':
-                    file_name = f"{time_flag}_step_{num_inference_steps}_seed_{seed}_{prompt[:50].replace('/', '').strip()}.mp4".replace(':',
-                                                                                                             ' ').replace(
-                        '\\', ' ')
+                    file_name = (f"{time_flag}_step_{num_inference_steps}_seed_{seed}.mp4"
+                                 .replace(':', ' ')
+                                 .replace('\\', ' '))
                 else:
-                    file_name = f"{time_flag}_step_{num_inference_steps}_seed_{seed}_{prompt[:100].replace('/', '').strip()}.mp4".replace(':',
-                                                                                                              ' ').replace(
-                        '\\', ' ')
+                    file_name = (f"{time_flag}_step_{num_inference_steps}_seed_{seed}.mp4"
+                                 .replace(':', ' ')
+                                 .replace('\\', ' '))
 
                 if current_image_filename is not None:
                     file_name = f"{current_image_filename}_{file_name}"
@@ -856,6 +857,7 @@ def generate_video(
 
 if __name__ == "__main__":
     from PIL import Image
+
     default_prompt = "High quality, ultrarealistic detail"
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     resolution = "720*1280"
