@@ -147,6 +147,13 @@ def _parse_args():
         help="select gpu id"
     )
 
+    parser.add_argument(
+        "--tea-cache",
+        type=float,
+        default=0.0,
+        help="tea cache setting"
+    )
+
     args = parser.parse_args()
 
     return args
@@ -158,7 +165,7 @@ args = _parse_args()
 args.flow_reverse = True
 
 device_id = int(args.device_id)
-
+tea_cache = float(args.tea_cache)
 preload = int(args.preload)
 force_profile_no = int(args.profile)
 verbose_level = int(args.verbose)
@@ -903,7 +910,7 @@ if __name__ == "__main__":
             flow_shift=default_flow_shift,
             embedded_guidance_scale=6.0,
             repeat_generation=repeat_generation,
-            tea_cache=0.03,
+            tea_cache=tea_cache,
             tea_cache_start_step_perc=20,
             loras_choices=default_loras_choices,
             loras_mult_choices=default_loras_multis_str,
