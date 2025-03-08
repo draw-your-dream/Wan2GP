@@ -120,11 +120,19 @@ def _parse_args():
     )
 
     parser.add_argument(
-        "--batch-input-dir",
+        "--input-dir",
         type=str,
         default="./infer_inputs",
-        help="batch infer input directory"
+        help="infer input images and prompts directory"
     )
+
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./infer_outputs",
+        help="output directory"
+    )
+
 
     parser.add_argument(
         "--sampling-steps",
@@ -166,6 +174,9 @@ args.flow_reverse = True
 
 device_id = int(args.device_id)
 tea_cache = float(args.tea_cache)
+infer_inputs = args.input_dir
+infer_outputs = args.output_dir
+
 preload = int(args.preload)
 force_profile_no = int(args.profile)
 verbose_level = int(args.verbose)
@@ -684,7 +695,7 @@ def generate_video(
     file_list = []
     state["file_list"] = file_list
     from einops import rearrange
-    save_path = os.path.join(os.getcwd(), "infer_outputs")
+    save_path = os.path.join(os.getcwd(), infer_outputs)
     os.makedirs(save_path, exist_ok=True)
     video_no = 0
     prompt_idx = 0
@@ -830,7 +841,7 @@ def generate_video(
                 if current_image_filename is not None:
                     file_name = f"{current_image_filename}_{file_name}"
 
-                video_path = os.path.join(os.getcwd(), "infer_outputs", file_name)
+                video_path = os.path.join(os.getcwd(), infer_outputs, file_name)
                 cache_video(
                     tensor=sample[None],
                     save_file=video_path,
@@ -864,23 +875,23 @@ if __name__ == "__main__":
 
     sampling_steps = args.sampling_steps
     repeat_generation = args.repeat_generation
-    batch_input_dir = args.batch_input_dir
-    if not os.path.isdir(batch_input_dir):
-        raise ValueError(f"batch_input_dir not exists: {batch_input_dir}")
+
+    if not os.path.isdir(infer_inputs):
+        raise ValueError(f"batch_input_dir not exists: {infer_inputs}")
 
     # load images and prompts from batch_input_dir, which image and prompt file name should be paired
     images = []
     prompts = []
-    for file in os.listdir(batch_input_dir):
+    for file in os.listdir(infer_inputs):
         if file.lower().endswith(".jpg") or file.lower().endswith(".jpeg") or file.lower().endswith(".png"):
             # get the image file name
-            image_file = os.path.join(batch_input_dir, file)
+            image_file = os.path.join(infer_inputs, file)
             # get the image file name without path and extension
             image_file_without_ext, _ = os.path.splitext(os.path.basename(image_file))
             img = Image.open(image_file).convert("RGB")
             images.append((img, image_file_without_ext))
             # get the prompt file name
-            prompt_file = os.path.join(batch_input_dir, f"{image_file_without_ext}.txt")
+            prompt_file = os.path.join(infer_inputs, f"{image_file_without_ext}.txt")
             # if the prompt file exists, read the prompt from the file
             if os.path.isfile(prompt_file):
                 with open(prompt_file, "r", encoding="utf-8") as reader:
