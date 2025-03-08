@@ -436,8 +436,6 @@ def load_models(i2v, lora_dir, lora_preselected_preset):
         kwargs["budgets"] = {"transformer": 100 if preload == 0 else preload, "text_encoder": 100, "*": 1000}
     elif profile == 3:
         kwargs["budgets"] = {"*": "70%"}
-    else:
-        kwargs["budgets"] = {"*": 0}
 
     loras, loras_names, default_loras_choices, default_loras_multis_str, default_lora_preset, loras_presets = setup_loras(
         pipe, lora_dir, lora_preselected_preset, None)
