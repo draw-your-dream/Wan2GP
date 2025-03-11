@@ -24,7 +24,7 @@ from .modules.vae import WanVAE
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-
+from wan.modules.posemb_layers import get_rotary_pos_embed
 
 class WanI2V:
 
@@ -146,7 +146,7 @@ class WanI2V:
                 callback = None,
                 enable_RIFLEx = False,
                 VAE_tile_size= 0,
-        
+                joint_pass = False,
                 ):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
@@ -290,7 +290,7 @@ class WanI2V:
         # sample videos
         latent = noise
 
-        freqs = self.model.get_rope_freqs(nb_latent_frames = int((frame_num - 1)/4 + 1), RIFLEx_k = 6 if enable_RIFLEx else None )
+        freqs = get_rotary_pos_embed(frame_num, h, w, enable_RIFLEx= enable_RIFLEx  ) 
 
         arg_c = {
             'context': [context[0]],
@@ -310,29 +310,48 @@ class WanI2V:
             'pipeline' : self
         }
 
+        arg_both= {
+            'context': [context[0]],
+            'context2': context_null,
+            'clip_fea': clip_context,
+            'seq_len': max_seq_len,
+            'y': [y],
+            'freqs' : freqs,
+            'pipeline' : self
+        }
+
         if offload_model:
             torch.cuda.empty_cache()
+
+        if self.model.enable_teacache:
+            self.model.compute_teacache_threshold(self.model.teacache_start_step, timesteps, self.model.teacache_multiplier)
 
         # self.model.to(self.device)
         if callback != None:
             callback(-1, None)
 
         for i, t in enumerate(tqdm(timesteps)):
+            offload.set_step_no_for_lora(i)
             latent_model_input = [latent.to(self.device)]
             timestep = [t]
 
             timestep = torch.stack(timestep).to(self.device)
-
-            noise_pred_cond = self.model(
-                latent_model_input, t=timestep, current_step=i, is_uncond = False, **arg_c)[0]
-            if self._interrupt:
-                return None                
-            if offload_model:
-                torch.cuda.empty_cache()
-            noise_pred_uncond = self.model(
-                latent_model_input, t=timestep, current_step=i, is_uncond = True, **arg_null)[0]
-            if self._interrupt:
-                return None                
+            if joint_pass:
+                noise_pred_cond, noise_pred_uncond = self.model(
+                    latent_model_input, t=timestep, current_step=i, **arg_both)
+                if self._interrupt:
+                    return None                
+            else:
+                noise_pred_cond = self.model(
+                    latent_model_input, t=timestep, current_step=i, is_uncond = False, **arg_c)[0]
+                if self._interrupt:
+                    return None                
+                if offload_model:
+                    torch.cuda.empty_cache()
+                noise_pred_uncond = self.model(
+                    latent_model_input, t=timestep, current_step=i, is_uncond = True, **arg_null)[0]
+                if self._interrupt:
+                    return None                
             del latent_model_input
             if offload_model:
                 torch.cuda.empty_cache()
