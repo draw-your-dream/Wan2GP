@@ -19,7 +19,10 @@ In this repository, we present **Wan2.1**, a comprehensive and open suite of vid
 
 
 ## 🔥 Latest News!!
-* Marc 17 2022: 👋 Wan2.1GP v2.0: The Lora festival continues:
+* Mar 18 2022: 👋 Wan2.1GP v2.11: Added more command line parameters to prefill the generation settings + customizable output directory and choice of type of metadata for generated videos. Many thanks to Tophness for his contributionsgit. You will need one more *pip install -r requirements.txt* to reflect new dependencies\
+* Mar 18 2022: 👋 Wan2.1GP v2.1: More Loras !: added support for 'Safetensors' and 'Replicate' Lora formats.\
+You will need to refresh the requirements with a *pip install -r requirements.txt*
+* Mar 17 2022: 👋 Wan2.1GP v2.0: The Lora festival continues:
     - Clearer user interface
     - Download 30 Loras in one click to try them all (expand the info section)
     - Very to use Loras as now Lora presets can input the subject (or other need terms) of the Lora so that you dont have to modify manually a prompt 
@@ -30,7 +33,7 @@ In this repository, we present **Wan2.1**, a comprehensive and open suite of vid
     - Lora Fest special edition: very fast loading / unload of loras for those Loras collectors around. You can also now add / remove loras in the Lora folder without restarting the app. You will need to refresh the requirements *pip install -r requirements.txt*
     - Added experimental Skip Layer Guidance (advanced settings), that should improve the image quality at no extra cost. Many thanks to the *AmericanPresidentJimmyCarter* for the original implementation
 * Mar 13, 2025: 👋 Wan2.1GP v1.6: Better Loras support, accelerated loading Loras. You will need to refresh the requirements *pip install -r requirements.txt*
-* Mar 10, 2025: 👋 Wan2.1GP v1.5: Official Teachache support + Smart Teacache (find automatically best parameters for a requested speed multiplier), 10% speed boost with no quality loss, improved lora presets (they can now  include prompts and comments to guide the user)
+* Mar 10, 2025: 👋 Wan2.1GP v1.5: Official Teacache support + Smart Teacache (find automatically best parameters for a requested speed multiplier), 10% speed boost with no quality loss, improved lora presets (they can now  include prompts and comments to guide the user)
 * Mar 07, 2025: 👋 Wan2.1GP v1.4: Fix Pytorch compilation, now it is really 20% faster when activated
 * Mar 04, 2025: 👋 Wan2.1GP v1.3: Support for Image to Video with multiples images for different images / prompts combinations (requires *--multiple-images* switch), and added command line *--preload x*  to preload in VRAM x MB of the main diffusion model if you find there is too much unused VRAM and you want to (slightly) accelerate the generation process.
 If you upgrade you will need to do a 'pip install -r requirements.txt' again.
@@ -232,7 +235,7 @@ You can define multiple lines of macros. If there is only one macro line, the ap
 --open-browser : open automatically Browser when launching Gradio Server\
 --lock-config : prevent modifying the video engine configuration from the interface\
 --share : create a shareable URL on huggingface so that your server can be accessed remotely\
---multiple-images : allow the users to choose multiple images as different starting points for new videos\ 
+--multiple-images : allow the users to choose multiple images as different starting points for new videos\
 --compile : turn on pytorch compilation\
 --attention mode: force attention mode among, sdpa, flash, sage, sage2\
 --profile no : default (4) : no of profile between 1 and 5\
@@ -240,6 +243,9 @@ You can define multiple lines of macros. If there is only one macro line, the ap
 --seed no : set default seed value\
 --frames no : set the default number of frames to generate\
 --steps no : set the default number of denoising steps\
+--res resolution : default resolution, choices=["480p", "720p", "823p", "1024p", "1280p"]\
+--teacache speed multiplier: Tea cache speed multiplier,  choices=["0", "1.5", "1.75", "2.0", "2.25", "2.5"]\
+--slg : turn on skip layer guidance for improved quality\
 --check-loras : filter loras that are incompatible (will take a few seconds while refreshing the lora list or while starting the app)\
 --advanced : turn on the advanced mode while launching the app
 

@@ -23,7 +23,12 @@ import asyncio
 from wan.utils import prompt_parser
 PROMPT_VARS_MAX = 10
 
-
+target_mmgp_version = "3.2.8"
+from importlib.metadata import version
+mmgp_version = version("mmgp")
+if mmgp_version != target_mmgp_version:
+    print(f"Incorrect version of mmgp ({mmgp_version}), version {target_mmgp_version} is needed. Please upgrade with the command 'pip install -r requirements.txt'")
+    exit()
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="Generate a video from a text prompt or image using Gradio")
@@ -77,8 +82,7 @@ def _parse_args():
 
     parser.add_argument(
         "--check-loras",
-        type=str,
-        default=0, 
+        action="store_true",
         help="Filter Loras that are not valid"
     )
 
@@ -215,6 +219,27 @@ def _parse_args():
     help="vae config mode"
     )    
 
+    parser.add_argument(
+        "--res",
+        type=str,
+        default="480p",
+        choices=["480p", "720p", "832p", "1024p", "1280p"],
+        help="Default resolution for the video (480p, 720p, 823p, 1024p or 1280p)"
+    )
+
+    parser.add_argument(
+        "--teacache",
+        type=str,
+        default="0",
+        choices=["0", "1.5", "1.75", "2.0", "2.25", "2.5"],
+        help="Default teacache setting"
+    )
+
+    parser.add_argument(
+        "--slg",
+        action="store_true",
+        help="Enable skip guidance"
+    )
 
     args = parser.parse_args()
 
@@ -265,7 +290,9 @@ if not Path(server_config_filename).is_file():
                      "transformer_filename": transformer_choices_t2v[0], 
                      "transformer_filename_i2v": transformer_choices_i2v[1],  ########
                      "text_encoder_filename" : text_encoder_choices[1],
+                     "save_path": os.path.join(os.getcwd(), "gradio_outputs"),
                      "compile" : "",
+                     "metadata_type": "metadata",
                      "default_ui": "t2v",
                      "boost" : 1,
                      "vae_config": 0,
@@ -299,6 +326,8 @@ if len(args.vae_config) > 0:
     vae_config = int(args.vae_config)
 
 default_ui = server_config.get("default_ui", "t2v") 
+metadata = server_config.get("metadata_type", "metadata")
+save_path = server_config.get("save_path", os.path.join(os.getcwd(), "gradio_outputs"))
 use_image2video = default_ui != "t2v"
 if args.t2v:
     use_image2video = False
@@ -326,7 +355,7 @@ else:
     root_lora_dir = lora_dir
 lora_dir = get_lora_dir(root_lora_dir)
 lora_preselected_preset = args.lora_preset
-default_tea_cache = 0
+default_tea_cache = float(args.teacache)
 # if args.fast : #or args.fastest
 #     transformer_filename_t2v = transformer_choices_t2v[2]
 #     attention_mode="sage2" if "sage2" in attention_modes_supported else "sage"
@@ -345,6 +374,54 @@ if  args.compile: #args.fastest or
 #attention_mode="sdpa"
 #attention_mode="xformers"
 # compile = "transformer"
+
+def preprocess_loras(sd):
+    if not use_image2video:
+        return sd
+    
+    new_sd = {}
+    first = next(iter(sd), None)
+    if first == None:
+        return sd
+    if  not first.startswith("lora_unet_"):
+        return sd
+    print("Converting Lora Safetensors format to Lora Diffusers format")
+    alphas = {}
+    repl_list = ["cross_attn", "self_attn", "ffn"]
+    src_list = ["_" + k + "_" for k in repl_list]
+    tgt_list = ["." + k + "." for k in repl_list]
+
+    for k,v in sd.items():
+        k = k.replace("lora_unet_blocks_","diffusion_model.blocks.")
+
+        for s,t in zip(src_list, tgt_list):
+            k = k.replace(s,t)
+
+        k = k.replace("lora_up","lora_B")
+        k = k.replace("lora_down","lora_A")
+
+        if "alpha" in k:
+            alphas[k] = v
+        else:
+            new_sd[k] = v
+
+    new_alphas = {}
+    for k,v in new_sd.items():
+        if "lora_B" in k:
+            dim = v.shape[1]
+        elif "lora_A" in k:
+            dim = v.shape[0]
+        else:
+            continue
+        alpha_key = k[:-len("lora_X.weight")] +"alpha"
+        if alpha_key in alphas:
+            scale = alphas[alpha_key] / dim
+            new_alphas[alpha_key] = scale
+        else:
+            print(f"Lora alpha'{alpha_key}' is missing")
+    new_sd.update(new_alphas)
+    return new_sd
+
 
 def download_models(transformer_filename, text_encoder_filename):
     def computeList(filename):
@@ -450,7 +527,7 @@ def setup_loras(transformer,  lora_dir, lora_preselected_preset, split_linear_mo
         loras_presets = [ Path(Path(file_path).parts[-1]).stem for file_path in dir_presets]
 
     if check_loras:
-        loras = offload.load_loras_into_model(transformer, loras,  activate_all_loras=False, check_only= True, split_linear_modules_map = split_linear_modules_map) #lora_multiplier,
+        loras = offload.load_loras_into_model(transformer, loras,  activate_all_loras=False, check_only= True, preprocess_sd=preprocess_loras, split_linear_modules_map = split_linear_modules_map) #lora_multiplier,
 
     if len(loras) > 0:
         loras_names = [ Path(lora).stem for lora in loras  ]
@@ -591,10 +668,12 @@ def apply_changes(  state,
                     transformer_t2v_choice,
                     transformer_i2v_choice,
                     text_encoder_choice,
+                    save_path_choice,
                     attention_choice,
                     compile_choice,
                     profile_choice,
                     vae_config_choice,
+                    metadata_choice,
                     default_ui_choice ="t2v",
                     boost_choice = 1
 ):
@@ -608,9 +687,11 @@ def apply_changes(  state,
                      "transformer_filename": transformer_choices_t2v[transformer_t2v_choice], 
                      "transformer_filename_i2v": transformer_choices_i2v[transformer_i2v_choice],  ##########
                      "text_encoder_filename" : text_encoder_choices[text_encoder_choice],
+                     "save_path" : save_path_choice,
                      "compile" : compile_choice,
                      "profile" : profile_choice,
                      "vae_config" : vae_config_choice,
+                     "metadata_choice": metadata_choice,
                      "default_ui" : default_ui_choice,
                      "boost" : boost_choice,
                        }
@@ -649,7 +730,7 @@ def apply_changes(  state,
     text_encoder_filename = server_config["text_encoder_filename"]
     vae_config = server_config["vae_config"]
     boost = server_config["boost"]
-    if  all(change in ["attention_mode", "vae_config", "default_ui", "boost"] for change in changes ):
+    if  all(change in ["attention_mode", "vae_config", "default_ui", "boost", "save_path", "metadata_choice"] for change in changes ):
         if "attention_mode" in changes:
             pass
 
@@ -834,6 +915,7 @@ def generate_video(
     slg_start,
     slg_end, 
     state,
+    metadata_choice,
     progress=gr.Progress() #track_tqdm= True
 
 ):
@@ -986,7 +1068,7 @@ def generate_video(
             list_mult_choices_nums  += [1.0] * ( len(loras_choices) - len(list_mult_choices_nums ) )
         loras_selected = [ lora for i, lora in enumerate(loras) if str(i) in loras_choices]
         pinnedLora = False # profile !=5
-        offload.load_loras_into_model(trans, loras_selected, list_mult_choices_nums, activate_all_loras=True, pinnedLora=pinnedLora, split_linear_modules_map = None) 
+        offload.load_loras_into_model(trans, loras_selected, list_mult_choices_nums, activate_all_loras=True, preprocess_sd=preprocess_loras, pinnedLora=pinnedLora, split_linear_modules_map = None) 
         errors = trans._loras_errors
         if len(errors) > 0:
             error_files = [msg for _ ,  msg  in errors]
@@ -1036,7 +1118,7 @@ def generate_video(
 
     file_list = []
     state["file_list"] = file_list    
-    save_path = os.path.join(os.getcwd(), "gradio_outputs")
+    global save_path
     os.makedirs(save_path, exist_ok=True)
     video_no = 0
     total_video =  repeat_generation * len(prompts)
@@ -1136,7 +1218,7 @@ def generate_video(
                 gc.collect()
                 torch.cuda.empty_cache()
                 s = str(e)
-                keyword_list = ["vram", "VRAM", "memory", "triton", "cuda", "allocat"]
+                keyword_list = ["vram", "VRAM", "memory","allocat"]
                 VRAM_crash= False
                 if any( keyword in s for keyword in keyword_list):
                     VRAM_crash = True
@@ -1177,7 +1259,7 @@ def generate_video(
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:50]).strip()}.mp4"
                 else:
                     file_name = f"{time_flag}_seed{seed}_{sanitize_file_name(prompt[:100]).strip()}.mp4"
-                video_path = os.path.join(os.getcwd(), "gradio_outputs", file_name)        
+                video_path = os.path.join(save_path, file_name)        
                 cache_video(
                     tensor=sample[None],
                     save_file=video_path,
@@ -1185,6 +1267,24 @@ def generate_video(
                     nrow=1,
                     normalize=True,
                     value_range=(-1, 1))
+                
+                configs = {
+                    'prompt': prompt,
+                    'negative_prompt': negative_prompt,
+                    'resolution': resolution,
+                    'video_length': video_length,
+                    'seed': seed,
+                    'num_inference_steps': num_inference_steps,
+                }
+
+                if metadata_choice == "json":
+                    with open(video_path.replace('.mp4', '.json'), 'w') as f:
+                        json.dump(configs, f, indent=4)
+                elif metadata_choice == "metadata":
+                    from mutagen.mp4 import MP4
+                    file = MP4(video_path)
+                    file.tags['©cmt'] = [json.dumps(configs)]
+                    file.save()
 
                 print(f"New video saved to Path: "+video_path)
                 file_list.append(video_path)
@@ -1254,7 +1354,7 @@ def save_lset(state, lset_name, loras_choices, loras_mult_choices, prompt, save_
         full_lset_name_filename = os.path.join(lora_dir, lset_name_filename) 
 
         with open(full_lset_name_filename, "w", encoding="utf-8") as writer:
-            writer.write(json.dumps(lset))
+            writer.write(json.dumps(lset, indent=4))
 
         if lset_name in loras_presets:
             gr.Info(f"Lora Preset '{lset_name}' has been updated")
@@ -1530,13 +1630,13 @@ def create_demo():
         }
 """
     default_flow_shift = get_default_flow(transformer_filename_i2v if use_image2video else transformer_filename_t2v)
-    with gr.Blocks(css=css, theme=gr.themes.Soft(primary_hue="emerald", neutral_hue="slate", text_size= "md")) as demo:
+    with gr.Blocks(css=css, theme=gr.themes.Soft(primary_hue="sky", neutral_hue="slate", text_size= "md")) as demo:
         state_dict = {}
        
         if use_image2video:
-            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v2.0 - Image To Video <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3> (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</FONT SIZE=3></H1></div>")
+            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v2.1 - Image To Video <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3> (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</FONT SIZE=3></H1></div>")
         else:
-            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v2.0 - Text To Video <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3> (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</FONT SIZE=3></H1></div>")
+            gr.Markdown("<div align=center><H1>Wan 2.1<SUP>GP</SUP> v2.1 - Text To Video <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3> (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A> / <A HREF='https://github.com/Wan-Video/Wan2.1'>Original by Alibaba</A>)</FONT SIZE=3></H1></div>")
 
         gr.Markdown("<FONT SIZE=3>Welcome to Wan 2.1GP a super fast and low VRAM AI Video Generator !</FONT>")
 
@@ -1610,6 +1710,10 @@ def create_demo():
                     value= index,
                     label="Text Encoder model"
                  )
+                save_path_choice = gr.Textbox(
+                    label="Output Folder for Generated Videos",
+                    value=server_config.get("save_path", save_path)
+                )
                 def check(mode): 
                     if not mode in attention_modes_supported:
                         return " (NOT INSTALLED)"
@@ -1683,6 +1787,16 @@ def create_demo():
                     # visible= True ############
                  )                
 
+                metadata_choice = gr.Dropdown(
+                    choices=[
+                        ("Export JSON files", "json"),
+                        ("Add metadata to video", "metadata"),
+                        ("Neither", "none")
+                    ],
+                    value=metadata,
+                    label="Metadata Handling"
+                )
+
                 msg = gr.Markdown()            
                 apply_btn  = gr.Button("Apply Changes")
 
@@ -1727,7 +1841,9 @@ def create_demo():
 
                 advanced_prompt = advanced
                 prompt_vars=[]
-                if not advanced_prompt:
+                if advanced_prompt:
+                    default_wizard_prompt, variables, values= None, None, None
+                else:
                     default_wizard_prompt, variables, values, errors =  extract_wizard_prompt(default_prompt)
                     advanced_prompt  = len(errors) > 0
 
@@ -1750,6 +1866,7 @@ def create_demo():
                 state = gr.State(state_dict)
              
                 with gr.Row():
+                    res = args.res
                     if use_image2video:
                         resolution = gr.Dropdown(
                             choices=[
@@ -1757,7 +1874,7 @@ def create_demo():
                                 ("720p", "1280x720"),
                                 ("480p", "832x480"),
                             ],
-                            value="832x480",
+                            value="1280x720" if res == "720p" else "832x480",
                             label="Resolution (video will have the same height / width ratio than the original image)"
                         )
 
@@ -1778,7 +1895,7 @@ def create_demo():
                                 # ("624x832 (3:4, 540p)", "624x832"),
                                 # ("720x720 (1:1, 540p)", "720x720"),
                             ],
-                            value="832x480",
+                            value={"480p": "832x480","720p": "1280x720","832p": "480x832","1024p": "1024x1024","1280p": "720x1280",}.get(res, "832x480"),
                             label="Resolution"
                         )
 
@@ -1812,19 +1929,17 @@ def create_demo():
                             flow_shift = gr.Slider(0.0, 25.0, value= default_flow_shift, step=0.1, label="Shift Scale") 
                         with gr.Row():
                             negative_prompt = gr.Textbox(label="Negative Prompt", value="")
-                        with gr.Row():
-                            gr.Markdown("<B>Loras can be used to create special effects on the video by mentioned a trigger word in the Prompt. You can save Loras combinations in presets.</B>")
-                        with gr.Column() as loras_column:
+                        with gr.Column(visible = len(loras)>0) as loras_column:
+                            gr.Markdown("<B>Loras can be used to create special effects on the video by mentioning a trigger word in the Prompt. You can save Loras combinations in presets.</B>")
                             loras_choices = gr.Dropdown(
                                 choices=[
                                     (lora_name, str(i) ) for i, lora_name in enumerate(loras_names)
                                 ],
                                 value= default_loras_choices,
                                 multiselect= True,
-                                visible= len(loras)>0,
                                 label="Activated Loras"
                             )
-                            loras_mult_choices = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by space characters or carriage returns, line that starts with # are ignored", value=default_loras_multis_str, visible= len(loras)>0 )
+                            loras_mult_choices = gr.Textbox(label="Loras Multipliers (1.0 by default) separated by space characters or carriage returns, line that starts with # are ignored", value=default_loras_multis_str)
 
 
                         with gr.Row():
@@ -1865,7 +1980,7 @@ def create_demo():
                                     ("OFF", 0),
                                     ("ON", 1), 
                                 ],
-                                value= 0,
+                                value= 1 if args.slg else 0,
                                 visible=True,
                                 scale = 1,
                                 label="Skip Layer guidance"
@@ -1947,6 +2062,7 @@ def create_demo():
                 slg_start_perc,
                 slg_end_perc,
                 state,
+                metadata_choice,
             ],
             outputs= [gen_status] #,state 
 
@@ -1963,10 +2079,12 @@ def create_demo():
                     transformer_t2v_choice,
                     transformer_i2v_choice,
                     text_encoder_choice,
+                    save_path_choice,
                     attention_choice,
                     compile_choice,                            
                     profile_choice,
                     vae_config_choice,
+                    metadata_choice,
                     default_ui_choice,
                     boost_choice,
                 ],
@@ -2002,6 +2120,6 @@ if __name__ == "__main__":
             url = "http://" + server_name 
         webbrowser.open(url + ":" + str(server_port), new = 0, autoraise = True)
 
-    demo.launch(server_name=server_name, server_port=server_port, share=args.share)
+    demo.launch(server_name=server_name, server_port=server_port, share=args.share, allowed_paths=[save_path])
 
  
