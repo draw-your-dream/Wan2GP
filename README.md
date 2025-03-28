@@ -19,25 +19,27 @@ In this repository, we present **Wan2.1**, a comprehensive and open suite of vid
 
 
 ## 🔥 Latest News!!
-* Mar 19 2022: 👋 Wan2.1GP v3.2: 
+* Mar 27 2025: 👋 Added support for the new Wan Fun InP models (image2video). The 14B Fun InP has probably better end image support but unfortunately existing loras do not work so well with it. The great novelty is the Fun InP image2 1.3B model : Image 2 Video is now accessible to even lower hardware configuration. It is not as good as the 14B models but very impressive for its size. You can choose any of those models in the Configuration tab. Many thanks to the VideoX-Fun team  (https://github.com/aigc-apps/VideoX-Fun)
+* Mar 26 2025: 👋 Good news ! Official support for RTX 50xx please check the installation instructions below. 
+* Mar 24 2025: 👋 Wan2.1GP v3.2: 
     - Added Classifier-Free Guidance Zero Star. The video should match better the text prompt (especially with text2video) at no performance cost: many thanks to the **CFG Zero * Team:**\
     Dont hesitate to give them a star if you appreciate the results:  https://github.com/WeichenFan/CFG-Zero-star 
     - Added back support for Pytorch compilation with Loras. It seems it had been broken for some time
     - Added possibility to keep a number of pregenerated videos in the Video Gallery (useful to compare outputs of different settings)
     You will need one more *pip install -r requirements.txt*
-* Mar 19 2022: 👋 Wan2.1GP v3.1: Faster launch and RAM optimizations (should require less RAM to run)\ 
+* Mar 19 2025: 👋 Wan2.1GP v3.1: Faster launch and RAM optimizations (should require less RAM to run)\ 
     You will need one more *pip install -r requirements.txt*
-* Mar 18 2022: 👋 Wan2.1GP v3.0: 
+* Mar 18 2025: 👋 Wan2.1GP v3.0: 
     - New Tab based interface, yon can switch from i2v to t2v conversely without restarting the app
     - Experimental Dual Frames mode for i2v, you can also specify an End frame. It doesn't always work, so you will need a few attempts.
     - You can save default settings in the files *i2v_settings.json* and *t2v_settings.json* that will be used when launching the app (you can also specify the path to different settings files)
     - Slight acceleration with loras\
     You will need one more *pip install -r requirements.txt*
     Many thanks to *Tophness* who created the framework (and did a big part of the work) of the multitabs and saved settings features 
-* Mar 18 2022: 👋 Wan2.1GP v2.11: Added more command line parameters to prefill the generation settings + customizable output directory and choice of type of metadata for generated videos. Many thanks to *Tophness* for his contributions. You will need one more *pip install -r requirements.txt* to reflect new dependencies\
-* Mar 18 2022: 👋 Wan2.1GP v2.1: More Loras !: added support for 'Safetensors' and 'Replicate' Lora formats.\
+* Mar 18 2025: 👋 Wan2.1GP v2.11: Added more command line parameters to prefill the generation settings + customizable output directory and choice of type of metadata for generated videos. Many thanks to *Tophness* for his contributions. You will need one more *pip install -r requirements.txt* to reflect new dependencies\
+* Mar 18 2025: 👋 Wan2.1GP v2.1: More Loras !: added support for 'Safetensors' and 'Replicate' Lora formats.\
 You will need to refresh the requirements with a *pip install -r requirements.txt*
-* Mar 17 2022: 👋 Wan2.1GP v2.0: The Lora festival continues:
+* Mar 17 2025: 👋 Wan2.1GP v2.0: The Lora festival continues:
     - Clearer user interface
     - Download 30 Loras in one click to try them all (expand the info section)
     - Very to use Loras as now Lora presets can input the subject (or other need terms) of the Lora so that you dont have to modify manually a prompt 
@@ -88,7 +90,7 @@ You will find the original Wan2.1 Video repository here: https://github.com/Wan-
  
 
 
-## Installation Guide for Linux and Windows
+## Installation Guide for Linux and Windows for GPUs up to RTX40xx
 
 **If you are looking for a one click installation, just go to the Pinokio App store : https://pinokio.computer/**
 
@@ -109,15 +111,23 @@ pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pyt
 # 2. Install pip dependencies
 pip install -r requirements.txt
 
-# 3.1 optional Sage attention support (30% faster, easy to install on Linux but much harder on Windows)
+# 3.1 optional Sage attention support (30% faster)
+# Windows only: extra step only needed for windows as triton is included in pytorch with the Linux version of pytorch
+pip install triton-windows 
+# For both Windows and Linux
 pip install sageattention==1.0.6 
 
-# or for Sage Attention 2 (40% faster, sorry only manual compilation for the moment)
+
+# 3.2 optional Sage 2 attention support (40% faster)
+# Windows only
+pip install triton-windows 
+pip install https://github.com/woct0rdho/SageAttention/releases/download/v2.1.1-windows/sageattention-2.1.1+cu126torch2.6.0-cp310-cp310-win_amd64.whl
+# Linux only (sorry only manual compilation for the moment, but is straight forward with Linux)
 git clone https://github.com/thu-ml/SageAttention
 cd SageAttention 
 pip install -e .
 
-# 3.2 optional Flash attention support (easy to install on Linux but much harder on Windows)
+# 3.3 optional Flash attention support (easy to install on Linux but may be complex on Windows as it will try to compile the cuda kernels)
 pip install flash-attn==2.7.2.post1
 
 ```
@@ -125,17 +135,38 @@ pip install flash-attn==2.7.2.post1
 Note pytorch *sdpa attention* is available by default. It is worth installing *Sage attention* (albout not as simple as it sounds) because it offers a 30% speed boost over *sdpa attention* at a small quality cost.
 In order to install Sage, you will need to install also Triton. If Triton is installed you can turn on *Pytorch Compilation* which will give you an additional 20% speed boost and reduced VRAM consumption.
 
-### Ready to use python wheels for Windows users
-I provide here links to simplify the installation for Windows users with Python 3.10 / Pytorch 2.51 / Cuda 12.4. I won't be able to provide support neither guarantee they do what they should do.
-- Triton attention (needed for *pytorch compilation* and *Sage attention*)
+## Installation Guide for Linux and Windows for GPUs up to RTX50xx
+RTX50XX are only supported by pytorch starting from pytorch 2.7.0 which is still in beta. Therefore this version may be less stable.\
+It is important to use Python 3.10 otherwise the pip wheels may not be compatible.
 ```
-pip install https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp310-cp310-win_amd64.whl # triton for pytorch 2.6.0
-```
+# 0 Download the source and create a Python 3.10.9 environment using conda or create a venv using python
+git clone https://github.com/deepbeepmeep/Wan2GP.git
+cd Wan2GP
+conda create -n wan2gp python=3.10.9
+conda activate wan2gp
 
-- Sage attention
-```
-pip install https://github.com/deepbeepmeep/SageAttention/raw/refs/heads/main/releases/sageattention-2.1.0-cp310-cp310-win_amd64.whl # for pytorch 2.6.0 (experimental, if it works, otherwise you you will need to install and compile manually, see above) 
- 
+# 1 Install pytorch 2.7.0:
+pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
+
+# 2. Install pip dependencies
+pip install -r requirements.txt
+
+# 3.1 optional Sage attention support (30% faster)
+# Windows only: extra step only needed for windows as triton is included in pytorch with the Linux version of pytorch
+pip install triton-windows 
+# For both Windows and Linux
+pip install sageattention==1.0.6 
+
+
+# 3.2 optional Sage 2 attention support (40% faster)
+# Windows only
+pip install triton-windows 
+pip install https://github.com/woct0rdho/SageAttention/releases/download/v2.1.1-windows/sageattention-2.1.1+cu128torch2.7.0-cp310-cp310-win_amd64.whl 
+
+# Linux only (sorry only manual compilation for the moment, but is straight forward with Linux)
+git clone https://github.com/thu-ml/SageAttention
+cd SageAttention 
+pip install -e .
 ```
 
 ## Run the application
@@ -157,6 +188,10 @@ python gradio_server.py --t2v-1-3B #for the 1.3B model
 To run the image to video generator (in Low VRAM mode): 
 ```bash
 python gradio_server.py --i2v
+```
+To run the 1.3B Fun InP image to video generator (in Low VRAM mode): 
+```bash
+python gradio_server.py --i2v-1-3B
 ```
 
 To be able to input multiple images with the image to video generator:
@@ -241,6 +276,8 @@ You can define multiple lines of macros. If there is only one macro line, the ap
 --t2v : launch the text to video generator (default defined in the configuration)\
 --t2v-14B : launch the 14B model text to video generator\
 --t2v-1-3B : launch the 1.3B model text to video generator\
+--i2v-14B : launch the 14B model image to video generator\
+--i2v-1-3B : launch the Fun InP 1.3B model image to video generator\
 --quantize-transformer bool: (default True) : enable / disable on the fly transformer quantization\
 --lora-dir path : Path of directory that contains Loras in diffusers / safetensor format\
 --lora-preset preset : name of preset gile (without the extension) to preload
