@@ -140,7 +140,7 @@ def sageattn(
     elif arch == "sm90":
         return sageattn_qk_int8_pv_fp8_cuda_sm90(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32+fp32")
     elif arch == "sm120":
-        return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, qk_quant_gran="per_warp", sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32") # sm120 has accurate fp32 accumulator for fp8 mma and triton kernel is currently not usable on sm120.
+        return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, qk_quant_gran="per_warp", sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32", smooth_v= True) # sm120 has accurate fp32 accumulator for fp8 mma and triton kernel is currently not usable on sm120.
     else:
         raise ValueError(f"Unsupported CUDA architecture: {arch}")
 
@@ -1075,13 +1075,13 @@ def sageattn_qk_int8_pv_fp8_cuda_sm90(
         q_int8, q_scale, k_int8, k_scale = per_thread_int8_triton(q, k, km, tensor_layout=tensor_layout, BLKQ=64, WARPQ=16, BLKK=128, WARPK=128)
 
     q_size = q.size()
+    kv_len = k.size(seq_dim)
     q_device = q.device
     del q,k
 
 
     # pad v to multiple of 128
     # TODO: modify per_channel_fp8 kernel to handle this
-    kv_len = k.size(seq_dim)
     v_pad_len = 128 - (kv_len % 128) if kv_len % 128 != 0 else 0
     if v_pad_len > 0:
         if tensor_layout == "HND":

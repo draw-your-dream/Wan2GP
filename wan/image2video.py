@@ -8,7 +8,7 @@ import sys
 import types
 from contextlib import contextmanager
 from functools import partial
-
+import json
 import numpy as np
 import torch
 import torch.cuda.amp as amp
@@ -25,7 +25,7 @@ from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from wan.modules.posemb_layers import get_rotary_pos_embed
-from wan.utils.utils import resize_lanczos
+from wan.utils.utils import resize_lanczos, calculate_new_dimensions
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -48,47 +48,17 @@ class WanI2V:
         self,
         config,
         checkpoint_dir,
-        rank=0,
-        t5_fsdp=False,
-        dit_fsdp=False,
-        use_usp=False,
-        t5_cpu=False,
-        init_on_cpu=True,
-        i2v720p= True,
         model_filename ="",
         text_encoder_filename="",
         quantizeTransformer = False,
-        dtype = torch.bfloat16
+        dtype = torch.bfloat16,
+        VAE_dtype = torch.float32,
+        mixed_precision_transformer = False
     ):
-        r"""
-        Initializes the image-to-video generation model components.
-
-        Args:
-            config (EasyDict):
-                Object containing model parameters initialized from config.py
-            checkpoint_dir (`str`):
-                Path to directory containing model checkpoints
-            device_id (`int`,  *optional*, defaults to 0):
-                Id of target GPU device
-            rank (`int`,  *optional*, defaults to 0):
-                Process rank for distributed training
-            t5_fsdp (`bool`, *optional*, defaults to False):
-                Enable FSDP sharding for T5 model
-            dit_fsdp (`bool`, *optional*, defaults to False):
-                Enable FSDP sharding for DiT model
-            use_usp (`bool`, *optional*, defaults to False):
-                Enable distribution strategy of USP.
-            t5_cpu (`bool`, *optional*, defaults to False):
-                Whether to place T5 model on CPU. Only works without t5_fsdp.
-                Enable initializing Transformer Model on CPU. Only works without FSDP or USP.
-            init_on_cpu (`bool`, *optional*, defaults to True):
-        """
         self.device = torch.device(f"cuda")
         self.config = config
-        self.rank = rank
-        self.use_usp = use_usp
-        self.t5_cpu = t5_cpu
         self.dtype = dtype
+        self.VAE_dtype = VAE_dtype
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
         # shard_fn = partial(shard_model, device_id=device_id)
@@ -104,7 +74,7 @@ class WanI2V:
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
         self.vae = WanVAE(
-            vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
+            vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint), dtype = VAE_dtype,
             device=self.device)
 
         self.clip = CLIPModel(
@@ -114,15 +84,29 @@ class WanI2V:
                                          config.clip_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
 
-        logging.info(f"Creating WanModel from {model_filename}")
+        logging.info(f"Creating WanModel from {model_filename[-1]}")
         from mmgp import offload
 
-        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer, writable_tensors= False)
-        if self.dtype == torch.float16 and not "fp16" in model_filename:
-            self.model.to(self.dtype) 
-        # offload.save_model(self.model, "i2v_720p_fp16.safetensors",do_quantize=True)
-        if self.dtype == torch.float16:
-            self.vae.model.to(self.dtype)
+        # fantasy = torch.load("c:/temp/fantasy.ckpt")
+        # proj_model = fantasy["proj_model"]
+        # audio_processor = fantasy["audio_processor"]
+        # offload.safetensors2.torch_write_file(proj_model, "proj_model.safetensors")
+        # offload.safetensors2.torch_write_file(audio_processor, "audio_processor.safetensors")
+        # for k,v in audio_processor.items():
+        #     audio_processor[k] = v.to(torch.bfloat16)
+        # with open("fantasy_config.json", "r", encoding="utf-8") as reader:
+        #     config_text = reader.read()
+        # config_json = json.loads(config_text)
+        # offload.safetensors2.torch_write_file(audio_processor, "audio_processor_bf16.safetensors", config=config_json)
+        # model_filename = [model_filename, "audio_processor_bf16.safetensors"] 
+        # model_filename = "c:/temp/i2v480p/diffusion_pytorch_model-00001-of-00007.safetensors"
+        # dtype = torch.float16
+        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer, writable_tensors= False) #, forcedConfigPath= "c:/temp/i2v720p/config.json")
+        self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
+        offload.change_dtype(self.model, dtype, True)
+        # offload.save_model(self.model, "wan2.1_image2video_720p_14B_mbf16.safetensors", config_file_path="c:/temp/i2v720p/config.json")
+        # offload.save_model(self.model, "wan2.1_image2video_720p_14B_quanto_mbf16_int8.safetensors",do_quantize=True, config_file_path="c:/temp/i2v720p/config.json")
+        # offload.save_model(self.model, "wan2.1_image2video_720p_14B_quanto_mfp16_int8.safetensors",do_quantize=True, config_file_path="c:/temp/i2v720p/config.json")
 
         # offload.save_model(self.model, "wan2.1_Fun_InP_1.3B_bf16_bis.safetensors")
         self.model.eval().requires_grad_(False)
@@ -134,7 +118,9 @@ class WanI2V:
         input_prompt,
         img,
         img2 = None,
-        max_area=720 * 1280,
+        height =720,
+        width = 1280,
+        fit_into_canvas = True,
         frame_num=81,
         shift=5.0,
         sample_solver='unipc',
@@ -142,7 +128,6 @@ class WanI2V:
         guide_scale=5.0,
         n_prompt="",
         seed=-1,
-        offload_model=True,
         callback = None,
         enable_RIFLEx = False,
         VAE_tile_size= 0,
@@ -152,7 +137,11 @@ class WanI2V:
         slg_end = 1.0,
         cfg_star_switch = True,
         cfg_zero_step = 5,
-        add_frames_for_end_image = True
+        add_frames_for_end_image = True,
+        audio_scale=None,
+        audio_cfg_scale=None,
+        audio_proj=None,
+        audio_context_lens=None,
     ):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
@@ -199,26 +188,28 @@ class WanI2V:
             if add_frames_for_end_image:
                 frame_num +=1
                 lat_frames = int((frame_num - 2) // self.vae_stride[0] + 2)
-                
+        
         h, w = img.shape[1:]
-        aspect_ratio = h / w
+
+        h, w = calculate_new_dimensions(height, width, h, w, fit_into_canvas)
+ 
         lat_h = round(
-            np.sqrt(max_area * aspect_ratio) // self.vae_stride[1] //
+            h // self.vae_stride[1] //
             self.patch_size[1] * self.patch_size[1])
         lat_w = round(
-            np.sqrt(max_area / aspect_ratio) // self.vae_stride[2] //
+            w // self.vae_stride[2] //
             self.patch_size[2] * self.patch_size[2])
         h = lat_h * self.vae_stride[1]
         w = lat_w * self.vae_stride[2]
-
+        
         clip_image_size = self.clip.model.image_size
-        img_interpolated = resize_lanczos(img, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device, self.dtype)
+        img_interpolated = resize_lanczos(img, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device) #, self.dtype
         img = resize_lanczos(img, clip_image_size, clip_image_size)
-        img = img.sub_(0.5).div_(0.5).to(self.device, self.dtype)
+        img = img.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
         if img2!= None:
-            img_interpolated2 = resize_lanczos(img2, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device, self.dtype)
+            img_interpolated2 = resize_lanczos(img2, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device) #, self.dtype
             img2 = resize_lanczos(img2, clip_image_size, clip_image_size)
-            img2 = img2.sub_(0.5).div_(0.5).to(self.device, self.dtype)
+            img2 = img2.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
 
         max_seq_len = lat_frames * lat_h * lat_w // ( self.patch_size[1] * self.patch_size[2])
 
@@ -244,25 +235,19 @@ class WanI2V:
         if n_prompt == "":
             n_prompt = self.sample_neg_prompt
 
-        # preprocess
-        if not self.t5_cpu:
-            # self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
-        else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+        if self._interrupt:
+            return None
 
-        context  = [u.to(self.dtype) for u in context]
-        context_null  = [u.to(self.dtype) for u in context_null]
+        # preprocess
+        context = self.text_encoder([input_prompt], self.device)[0]
+        context_null = self.text_encoder([n_prompt], self.device)[0]
+        context  = context.to(self.dtype)
+        context_null  = context_null.to(self.dtype)
+
+        if self._interrupt:
+            return None
 
         clip_context = self.clip.visual([img[:, None, :, :]])
-        if offload_model:
-            self.clip.model.cpu()
 
         from mmgp import offload
         offload.last_offload_obj.unload_all()
@@ -270,23 +255,20 @@ class WanI2V:
             mean2 = 0
             enc= torch.concat([
                     img_interpolated,
-                    torch.full( (3, frame_num-2,  h, w), mean2, device=self.device, dtype= self.dtype),
+                    torch.full( (3, frame_num-2,  h, w), mean2, device=self.device, dtype= self.VAE_dtype),
                     img_interpolated2,
             ], dim=1).to(self.device)
         else:
             enc= torch.concat([
                     img_interpolated,
-                    torch.zeros(3, frame_num-1, h, w, device=self.device, dtype= self.dtype)
+                    torch.zeros(3, frame_num-1, h, w, device=self.device, dtype= self.VAE_dtype)
             ], dim=1).to(self.device)
+        img, img2, img_interpolated, img_interpolated2 = None, None, None, None
 
         lat_y = self.vae.encode([enc], VAE_tile_size, any_end_frame= any_end_frame and add_frames_for_end_image)[0]
         y = torch.concat([msk, lat_y])
+        lat_y = None
 
-        @contextmanager
-        def noop_no_sync():
-            yield
-
-        no_sync = getattr(self.model, 'no_sync', noop_no_sync)
 
         # evaluation mode
 
@@ -313,108 +295,101 @@ class WanI2V:
 
         # sample videos
         latent = noise
-        batch_size  = latent.shape[0]
+        batch_size  = 1
         freqs = get_rotary_pos_embed(latent.shape[1:],  enable_RIFLEx= enable_RIFLEx) 
 
-        arg_c = {
-            'context': [context[0]],
-            'clip_fea': clip_context,
-            'y': [y],
-            'freqs' : freqs,
-            'pipeline' : self,
-            'callback' : callback
-        }
+        kwargs = {  'clip_fea': clip_context, 'y': y, 'freqs' : freqs, 'pipeline' : self, 'callback' : callback }
 
-        arg_null = {
-            'context': context_null,
-            'clip_fea': clip_context,
-            'y': [y],
-            'freqs' : freqs,
-            'pipeline' : self,
-            'callback' : callback
-        }
-
-        arg_both= {
-            'context': [context[0]],
-            'context2': context_null,
-            'clip_fea': clip_context,
-            'y': [y],
-            'freqs' : freqs,
-            'pipeline' : self,
-            'callback' : callback
-        }
-
-        if offload_model:
-            torch.cuda.empty_cache()
+        if audio_proj != None:
+            kwargs.update({
+            "audio_proj": audio_proj.to(self.dtype),
+            "audio_context_lens": audio_context_lens,
+            }) 
 
         if self.model.enable_teacache:
+            self.model.previous_residual = [None] * (3 if audio_cfg_scale !=None else 2)
             self.model.compute_teacache_threshold(self.model.teacache_start_step, timesteps, self.model.teacache_multiplier)
 
         # self.model.to(self.device)
         if callback != None:
-            callback(-1, True)
-
+            callback(-1, None, True)
+        latent = latent.to(self.device)
         for i, t in enumerate(tqdm(timesteps)):
             offload.set_step_no_for_lora(self.model, i)
-            slg_layers_local = None
-            if int(slg_start * sampling_steps) <= i < int(slg_end * sampling_steps):
-                slg_layers_local = slg_layers
-
-            latent_model_input = [latent.to(self.device)]
+            kwargs["slg_layers"] = slg_layers if int(slg_start * sampling_steps) <= i < int(slg_end * sampling_steps) else None
+            latent_model_input = latent
             timestep = [t]
 
             timestep = torch.stack(timestep).to(self.device)
+            kwargs.update({
+                't' :timestep,
+                'current_step' :i,
+            })
+              
+              
             if joint_pass:
-                noise_pred_cond, noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, current_step=i, slg_layers=slg_layers_local, **arg_both)
+                if audio_proj == None:
+                    noise_pred_cond, noise_pred_uncond = self.model(
+                        [latent_model_input, latent_model_input],
+                        context=[context, context_null],
+                        **kwargs)
+                else:
+                    noise_pred_cond, noise_pred_noaudio, noise_pred_uncond = self.model(
+                        [latent_model_input, latent_model_input, latent_model_input],
+                        context=[context, context, context_null],
+                        audio_scale = [audio_scale, None, None ],
+                        **kwargs)
+
                 if self._interrupt:
                     return None                
             else:
                 noise_pred_cond = self.model(
-                    latent_model_input,
-                    t=timestep,
-                    current_step=i,
-                    is_uncond=False,
-                    **arg_c,
+                    [latent_model_input],
+                    context=[context],
+                    audio_scale = None if audio_scale == None else [audio_scale],
+                    x_id=0,
+                    **kwargs,
                 )[0]
                 if self._interrupt:
-                    return None                
-                if offload_model:
-                    torch.cuda.empty_cache()
+                    return None
+                
+                if audio_proj != None:
+                    noise_pred_noaudio = self.model(
+                        [latent_model_input],
+                        x_id=1,
+                        context=[context],
+                        **kwargs,
+                    )[0]
+                    if self._interrupt:
+                        return None
+
                 noise_pred_uncond = self.model(
-                    latent_model_input,
-                    t=timestep,
-                    current_step=i,
-                    is_uncond=True,
-                    slg_layers=slg_layers_local,
-                    **arg_null,
+                    [latent_model_input],
+                    x_id=1 if audio_scale == None else 2,
+                    context=[context_null],
+                    **kwargs,
                 )[0]
                 if self._interrupt:
                     return None                
             del latent_model_input
-            if offload_model:
-                torch.cuda.empty_cache()
+
             # CFG Zero *. Thanks to https://github.com/WeichenFan/CFG-Zero-star/
-            noise_pred_text = noise_pred_cond
             if cfg_star_switch:
-                positive_flat = noise_pred_text.view(batch_size, -1)  
+                positive_flat = noise_pred_cond.view(batch_size, -1)  
                 negative_flat = noise_pred_uncond.view(batch_size, -1)  
 
                 alpha = optimized_scale(positive_flat,negative_flat)
                 alpha = alpha.view(batch_size, 1, 1, 1)
 
-
                 if (i <= cfg_zero_step):
-                    noise_pred = noise_pred_text*0.  # it would be faster not to compute noise_pred...
+                    noise_pred = noise_pred_cond*0.  # it would be faster not to compute noise_pred...
                 else:
                     noise_pred_uncond *= alpha
-            noise_pred = noise_pred_uncond + guide_scale * (noise_pred_text - noise_pred_uncond)            
-
-            del noise_pred_uncond
-
-            latent = latent.to(
-                torch.device('cpu') if offload_model else self.device)
-
+            if audio_scale == None:
+                noise_pred = noise_pred_uncond + guide_scale * (noise_pred_cond - noise_pred_uncond)            
+            else:
+                noise_pred = noise_pred_uncond + guide_scale * (noise_pred_noaudio - noise_pred_uncond) + audio_cfg_scale * (noise_pred_cond  - noise_pred_noaudio)                
+            noise_pred_uncond, noise_pred_noaudio = None, None
             temp_x0 = sample_scheduler.step(
                 noise_pred.unsqueeze(0),
                 t,
@@ -426,32 +401,16 @@ class WanI2V:
             del timestep
 
             if callback is not None:
-                callback(i, False) 
+                callback(i, latent, False) 
 
+        x0 = [latent]        
+        video = self.vae.decode(x0, VAE_tile_size, any_end_frame= any_end_frame and add_frames_for_end_image)[0]
 
-        x0 = [latent.to(self.device, dtype=self.dtype)]
-
-        if offload_model:
-            self.model.cpu()
-            torch.cuda.empty_cache()
-
-        if self.rank == 0:
-            # x0 = [lat_y]
-            video = self.vae.decode(x0, VAE_tile_size, any_end_frame= any_end_frame and add_frames_for_end_image)[0]
-
-            if any_end_frame and add_frames_for_end_image:
-                # video[:,  -1:] = img_interpolated2
-                video = video[:,  :-1]  
-
-        else:
-            video = None
+        if any_end_frame and add_frames_for_end_image:
+            # video[:,  -1:] = img_interpolated2
+            video = video[:,  :-1]  
 
         del noise, latent
         del sample_scheduler
-        if offload_model:
-            gc.collect()
-            torch.cuda.synchronize()
-        if dist.is_initialized():
-            dist.barrier()
 
         return video
