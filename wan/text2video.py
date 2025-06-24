@@ -27,6 +27,7 @@ from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from wan.modules.posemb_layers import get_rotary_pos_embed
 from .utils.vace_preprocessor import VaceVideoProcessor
 from wan.utils.basic_flowmatch import FlowMatchScheduler
+from wan.utils.utils import get_outpainting_frame_location
 
 def optimized_scale(positive_flat, negative_flat):
 
@@ -50,8 +51,11 @@ class WanT2V:
         checkpoint_dir,
         rank=0,
         model_filename = None,
+        model_type = None, 
+        base_model_type = None,
         text_encoder_filename = None,
         quantizeTransformer = False,
+        save_quantized = False,
         dtype = torch.bfloat16,
         VAE_dtype = torch.float32,
         mixed_precision_transformer = False
@@ -81,25 +85,30 @@ class WanT2V:
         logging.info(f"Creating WanModel from {model_filename[-1]}")
         from mmgp import offload
         # model_filename = "c:/temp/vace1.3/diffusion_pytorch_model.safetensors"
-        # model_filename = "vace14B_quanto_bf16_int8.safetensors"
-        # model_filename = "c:/temp/phantom/Phantom_Wan_14B-00001-of-00006.safetensors"
-        # config_filename= "c:/temp/phantom/config.json"
-        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer, writable_tensors= False)#, forcedConfigPath= config_filename)
-        # offload.load_model_data(self.model, "e:/vace.safetensors")
+        # model_filename = "Vacefusionix_quanto_fp16_int8.safetensors"
+        # model_filename = "c:/temp/t2v/diffusion_pytorch_model-00001-of-00006.safetensors"
+        # config_filename= "c:/temp/t2v/t2v.json"
+        base_config_file = f"configs/{base_model_type}.json"
+        forcedConfigPath = base_config_file if len(model_filename) > 1 else None
+        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
         # offload.load_model_data(self.model, "c:/temp/Phantom-Wan-1.3B.pth")
         # self.model.to(torch.bfloat16)
         # self.model.cpu()
         self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
         # dtype = torch.bfloat16
+        # offload.load_model_data(self.model, "ckpts/Wan14BT2VFusioniX_fp16.safetensors")
         offload.change_dtype(self.model, dtype, True)
-        # offload.save_model(self.model, "wan2.1_phantom_14B_mbf16.safetensors", config_file_path=config_filename)
-        # offload.save_model(self.model, "wan2.1_phantom_14B_quanto_fp16_int8.safetensors", do_quantize= True, config_file_path=config_filename)
+        # offload.save_model(self.model, "wan2.1_selforcing_fp16.safetensors", config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.1_text2video_14B_mbf16.safetensors", config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.1_text2video_14B_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
         self.model.eval().requires_grad_(False)
-
+        if save_quantized:
+            from wgp import save_quantized_model
+            save_quantized_model(self.model, model_type, model_filename[1 if base_model_type=="fantasy" else 0], dtype, base_config_file)
 
         self.sample_neg_prompt = config.sample_neg_prompt
 
-        if "Vace" in model_filename[-1]:
+        if base_model_type in ["vace_14B", "vace_1.3B"]:
             self.vid_proc = VaceVideoProcessor(downsample=tuple([x * y for x, y in zip(config.vae_stride, self.patch_size)]),
                                             min_area=480*832,
                                             max_area=480*832,
@@ -123,7 +132,7 @@ class WanT2V:
             inactive = [i * (1 - m) + 0 * m for i, m in zip(frames, masks)]
             reactive = [i * m + 0 * (1 - m) for i, m in zip(frames, masks)]
             inactive = self.vae.encode(inactive, tile_size = tile_size)
-            self.toto = inactive[0].clone() 
+
             if overlapped_latents  != None  : 
                 # inactive[0][:, 0:1] = self.vae.encode([frames[0][:, 0:1]], tile_size = tile_size)[0] # redundant
                 inactive[0][:, 1:overlapped_latents.shape[1] + 1] = overlapped_latents
@@ -180,20 +189,52 @@ class WanT2V:
     def vace_latent(self, z, m):
         return [torch.cat([zz, mm], dim=0) for zz, mm in zip(z, m)]
 
-    def prepare_source(self, src_video, src_mask, src_ref_images, total_frames, image_size,  device, original_video = False, keep_frames= [], start_frame = 0,  fit_into_canvas = True, pre_src_video = None):
+    def fit_image_into_canvas(self, ref_img, image_size, canvas_tf_bg, device, fill_max = False, outpainting_dims = None):
+        from wan.utils.utils import save_image
+        ref_width, ref_height = ref_img.size
+        if (ref_height, ref_width) == image_size and outpainting_dims  == None:
+            ref_img = TF.to_tensor(ref_img).sub_(0.5).div_(0.5).unsqueeze(1)
+        else:
+            if outpainting_dims != None:
+                final_height, final_width = image_size
+                canvas_height, canvas_width, margin_top, margin_left =   get_outpainting_frame_location(final_height, final_width,  outpainting_dims, 8)        
+            else:
+                canvas_height, canvas_width = image_size
+            scale = min(canvas_height / ref_height, canvas_width / ref_width)
+            new_height = int(ref_height * scale)
+            new_width = int(ref_width * scale)
+            if fill_max  and (canvas_height - new_height) < 16:
+                new_height = canvas_height
+            if fill_max  and (canvas_width - new_width) < 16:
+                new_width = canvas_width
+            top = (canvas_height - new_height) // 2
+            left = (canvas_width - new_width) // 2
+            ref_img = ref_img.resize((new_width, new_height), resample=Image.Resampling.LANCZOS) 
+            ref_img = TF.to_tensor(ref_img).sub_(0.5).div_(0.5).unsqueeze(1)
+            if outpainting_dims != None:
+                white_canvas = torch.full((3, 1, final_height, final_width), canvas_tf_bg, dtype= torch.float, device=device) # [-1, 1]
+                white_canvas[:, :, margin_top + top:margin_top + top + new_height, margin_left + left:margin_left + left + new_width] = ref_img 
+            else:
+                white_canvas = torch.full((3, 1, canvas_height, canvas_width), canvas_tf_bg, dtype= torch.float, device=device) # [-1, 1]
+                white_canvas[:, :, top:top + new_height, left:left + new_width] = ref_img 
+            ref_img = white_canvas
+        return ref_img.to(device)
+
+    def prepare_source(self, src_video, src_mask, src_ref_images, total_frames, image_size,  device, keep_frames= [], start_frame = 0,  fit_into_canvas = None, pre_src_video = None, inject_frames = [], outpainting_dims = None):
         image_sizes = []
         trim_video = len(keep_frames)
-        canvas_height, canvas_width = image_size
+        def conv_tensor(t, device):
+            return t.float().div_(127.5).add_(-1).permute(3, 0, 1, 2).to(device)
 
         for i, (sub_src_video, sub_src_mask, sub_pre_src_video) in enumerate(zip(src_video, src_mask,pre_src_video)):
             prepend_count = 0 if sub_pre_src_video == None else sub_pre_src_video.shape[1]
-            num_frames = total_frames - prepend_count 
+            num_frames = total_frames - prepend_count            
+            num_frames = min(num_frames, trim_video) if trim_video > 0 else num_frames
             if sub_src_mask is not None and sub_src_video is not None:
-                src_video[i], src_mask[i], _, _, _ = self.vid_proc.load_video_pair(sub_src_video, sub_src_mask, max_frames= num_frames, trim_video = trim_video - prepend_count, start_frame = start_frame, canvas_height = canvas_height, canvas_width = canvas_width, fit_into_canvas = fit_into_canvas)
+                src_video[i] = conv_tensor(sub_src_video[:num_frames], device)
+                src_mask[i] = conv_tensor(sub_src_mask[:num_frames], device)
                 # src_video is [-1, 1] (at this function output), 0 = inpainting area (in fact 127  in [0, 255])
                 # src_mask is [-1, 1] (at this function output), 0 = preserve original video (in fact 127  in [0, 255]) and 1 = Inpainting (in fact 255  in [0, 255])
-                src_video[i] = src_video[i].to(device)
-                src_mask[i] = src_mask[i].to(device)
                 if prepend_count > 0:
                     src_video[i] =  torch.cat( [sub_pre_src_video, src_video[i]], dim=1)
                     src_mask[i] =  torch.cat( [torch.full_like(sub_pre_src_video, -1.0), src_mask[i]] ,1)
@@ -212,9 +253,8 @@ class WanT2V:
                     src_mask[i] = torch.ones_like(src_video[i], device=device)
                 image_sizes.append(image_size)
             else:
-                src_video[i], _, _, _ = self.vid_proc.load_video(sub_src_video, max_frames= num_frames, trim_video = trim_video - prepend_count, start_frame = start_frame, canvas_height = canvas_height, canvas_width = canvas_width, fit_into_canvas = fit_into_canvas)
-                src_video[i] = src_video[i].to(device)
-                src_mask[i] = torch.zeros_like(src_video[i], device=device) if original_video else torch.ones_like(src_video[i], device=device)
+                src_video[i] = conv_tensor(sub_src_video[:num_frames], device)
+                src_mask[i] = torch.ones_like(src_video[i], device=device)
                 if prepend_count > 0:
                     src_video[i] =  torch.cat( [sub_pre_src_video, src_video[i]], dim=1)
                     src_mask[i] =  torch.cat( [torch.zeros_like(sub_pre_src_video), src_mask[i]] ,1)
@@ -228,32 +268,25 @@ class WanT2V:
                     src_video[i][:, k:k+1] = 0
                     src_mask[i][:, k:k+1] = 1
 
+            for k, frame in enumerate(inject_frames):
+                if frame != None:
+                    src_video[i][:, k:k+1] = self.fit_image_into_canvas(frame, image_size, 0, device, True, outpainting_dims)
+                    src_mask[i][:, k:k+1] = 0
+        
+
         for i, ref_images in enumerate(src_ref_images):
             if ref_images is not None:
                 image_size = image_sizes[i]
                 for j, ref_img in enumerate(ref_images):
-                    if ref_img is not None:
-                        ref_img = TF.to_tensor(ref_img).sub_(0.5).div_(0.5).unsqueeze(1)
-                        if ref_img.shape[-2:] != image_size:
-                            canvas_height, canvas_width = image_size
-                            ref_height, ref_width = ref_img.shape[-2:]
-                            white_canvas = torch.ones((3, 1, canvas_height, canvas_width), device=device) # [-1, 1]
-                            scale = min(canvas_height / ref_height, canvas_width / ref_width)
-                            new_height = int(ref_height * scale)
-                            new_width = int(ref_width * scale)
-                            resized_image = F.interpolate(ref_img.squeeze(1).unsqueeze(0), size=(new_height, new_width), mode='bilinear', align_corners=False).squeeze(0).unsqueeze(1)
-                            top = (canvas_height - new_height) // 2
-                            left = (canvas_width - new_width) // 2
-                            white_canvas[:, :, top:top + new_height, left:left + new_width] = resized_image
-                            ref_img = white_canvas
-                        src_ref_images[i][j] = ref_img.to(device)
+                    if ref_img is not None and not torch.is_tensor(ref_img):
+                        src_ref_images[i][j] = self.fit_image_into_canvas(ref_img, image_size, 1, device)
         return src_video, src_mask, src_ref_images
 
     def decode_latent(self, zs, ref_images=None, tile_size= 0 ):
         if ref_images is None:
             ref_images = [None] * len(zs)
-        else:
-            assert len(zs) == len(ref_images)
+        # else:
+        #     assert len(zs) == len(ref_images)
 
         trimed_zs = []
         for z, refs in zip(zs, ref_images):
@@ -279,7 +312,7 @@ class WanT2V:
                 input_ref_images = None,      
                 input_video=None,
                 target_camera=None,                  
-                context_scale=1.0,
+                context_scale=None,
                 width = 1280,
                 height = 720,
                 fit_into_canvas = True,
@@ -444,7 +477,8 @@ class WanT2V:
             kwargs.update({'cam_emb': cam_emb})
 
         if vace:
-            ref_images_count = len(input_ref_images[0]) if input_ref_images != None and input_ref_images[0] != None else 0 
+            ref_images_count = len(input_ref_images[0]) if input_ref_images != None and input_ref_images[0] != None else 0
+            context_scale = context_scale if context_scale != None else [1.0] * len(z)
             kwargs.update({'vace_context' : z, 'vace_context_scale' : context_scale})
             if overlapped_latents != None :
                 overlapped_latents_size = overlapped_latents.shape[1] + 1
@@ -452,13 +486,18 @@ class WanT2V:
                 z_reactive = [  zz[0:16, 0:overlapped_latents_size + ref_images_count].clone() for zz in z]
 
 
-        if self.model.enable_teacache:
+        if self.model.enable_cache:
             x_count = 3 if phantom else 2
             self.model.previous_residual = [None] * x_count 
-            self.model.compute_teacache_threshold(self.model.teacache_start_step, timesteps, self.model.teacache_multiplier)
+            self.model.compute_teacache_threshold(self.model.cache_start_step, timesteps, self.model.teacache_multiplier)
         if callback != None:
             callback(-1, None, True)
-        prev = 50/1000
+
+        offload.shared_state["_chipmunk"] =  False
+        chipmunk = offload.shared_state.get("_chipmunk", False)        
+        if chipmunk:
+            self.model.setup_chipmunk()
+
         for i, t in enumerate(tqdm(timesteps)):
 
             timestep = [t]
@@ -470,14 +509,14 @@ class WanT2V:
                 latent_noise_factor = t / 1000
                 for zz, zz_r, ll in zip(z, z_reactive, [latents]):
                     pass
-                    # zz[0:16, ref_images_count:overlapped_latents_size + ref_images_count]   = zz_r[:, ref_images_count:]  * (1.0 - overlap_noise_factor) + torch.randn_like(zz_r[:, ref_images_count:] ) * overlap_noise_factor 
-                    # ll[:, 0:overlapped_latents_size + ref_images_count]   = zz_r  * (1.0 - latent_noise_factor) + torch.randn_like(zz_r ) * latent_noise_factor 
+                    zz[0:16, ref_images_count:overlapped_latents_size + ref_images_count]   = zz_r[:, ref_images_count:]  * (1.0 - overlap_noise_factor) + torch.randn_like(zz_r[:, ref_images_count:] ) * overlap_noise_factor 
+                    ll[:, 0:overlapped_latents_size + ref_images_count]   = zz_r  * (1.0 - latent_noise_factor) + torch.randn_like(zz_r ) * latent_noise_factor 
 
             if conditioning_latents_size > 0 and overlap_noise > 0:
                 pass
                 overlap_noise_factor = overlap_noise / 1000 
-                latents[:, conditioning_latents_size + ref_images_count:]   = latents[:, conditioning_latents_size + ref_images_count:]  * (1.0 - overlap_noise_factor) + torch.randn_like(latents[:, conditioning_latents_size + ref_images_count:]) * overlap_noise_factor 
-                #timestep = [torch.tensor([t.item()] * (conditioning_latents_size + ref_images_count) + [t.item() - overlap_noise]*(len(timesteps) - conditioning_latents_size - ref_images_count))]
+                # latents[:, conditioning_latents_size + ref_images_count:]   = latents[:, conditioning_latents_size + ref_images_count:]  * (1.0 - overlap_noise_factor) + torch.randn_like(latents[:, conditioning_latents_size + ref_images_count:]) * overlap_noise_factor 
+                # timestep = [torch.tensor([t.item()] * (conditioning_latents_size + ref_images_count) + [t.item() - overlap_noise]*(target_shape[1] - conditioning_latents_size - ref_images_count))]
 
             if target_camera != None:
                 latent_model_input = torch.cat([latents, source_latents], dim=1)
@@ -570,6 +609,9 @@ class WanT2V:
 
         x0 = [latents]
 
+        if chipmunk:
+            self.model.release_chipmunk() # need to add it at every exit when in prof
+
         if return_latent_slice != None:
             if overlapped_latents != None:
                 # latents [:, 1:] = self.toto
@@ -597,5 +639,3 @@ class WanT2V:
             target = modules_dict[f"blocks.{model_layer}"]
             setattr(target, "vace", module )
         delattr(model, "vace_blocks")
-
- 

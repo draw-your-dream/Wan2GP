@@ -154,7 +154,8 @@ class WanSelfAttention(nn.Module):
                  num_heads,
                  window_size=(-1, -1),
                  qk_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 block_no=0):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -163,6 +164,7 @@ class WanSelfAttention(nn.Module):
         self.window_size = window_size
         self.qk_norm = qk_norm
         self.eps = eps
+        self.block_no = block_no
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -171,6 +173,7 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
 
     def forward(self, xlist, grid_sizes, freqs, block_mask = None):
         r"""
@@ -197,7 +200,15 @@ class WanSelfAttention(nn.Module):
         del q,k
 
         q,k = apply_rotary_emb(qklist, freqs, head_first=False)
-        if block_mask == None:
+        chipmunk = offload.shared_state.get("_chipmunk", False) 
+        if chipmunk and self.__class__ == WanSelfAttention:
+            q = q.transpose(1,2)
+            k = k.transpose(1,2)
+            v = v.transpose(1,2)
+            attn_layers = offload.shared_state["_chipmunk_layers"]
+            x = attn_layers[self.block_no](q, k, v)
+            x = x.transpose(1,2)
+        elif block_mask == None:
             qkv_list = [q,k,v]
             del q,k,v
             x = pay_attention(
@@ -281,8 +292,9 @@ class WanI2VCrossAttention(WanSelfAttention):
                  num_heads,
                  window_size=(-1, -1),
                  qk_norm=True,
-                 eps=1e-6):
-        super().__init__(dim, num_heads, window_size, qk_norm, eps)
+                 eps=1e-6,
+                 block_no=0):
+        super().__init__(dim, num_heads, window_size, qk_norm, eps, block_no)
 
         self.k_img = nn.Linear(dim, dim)
         self.v_img = nn.Linear(dim, dim)
@@ -362,7 +374,8 @@ class WanAttentionBlock(nn.Module):
                  qk_norm=True,
                  cross_attn_norm=False,
                  eps=1e-6,
-                 block_id=None
+                 block_id=None,
+                 block_no = 0
                  ):
         super().__init__()
         self.dim = dim
@@ -372,11 +385,12 @@ class WanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        self.block_no = block_no
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
-                                          eps)
+                                          eps, block_no= block_no)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
@@ -384,7 +398,8 @@ class WanAttentionBlock(nn.Module):
                                                                       num_heads,
                                                                       (-1, -1),
                                                                       qk_norm,
-                                                                      eps)
+                                                                      eps, 
+                                                                      block_no)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
@@ -402,7 +417,7 @@ class WanAttentionBlock(nn.Module):
         freqs,
         context,
         hints= None, 
-        context_scale=1.0,
+        context_scale=[1.0],
         cam_emb= None,
         block_mask = None,
         audio_proj= None,
@@ -416,7 +431,7 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        hint = None
+        hints_processed = None
         attention_dtype =  self.self_attn.q.weight.dtype 
         dtype = x.dtype
 
@@ -427,10 +442,13 @@ class WanAttentionBlock(nn.Module):
                 "context" : context,
                 "e" : e,
             }
-            if self.block_id == 0:
-                hint = self.vace(hints, x, **kwargs)
-            else:
-                hint = self.vace(hints, None, **kwargs)
+            hints_processed= []
+            for scale, hint in zip(context_scale, hints):
+                if scale == 0:
+                    hints_processed.append(None)
+                else:
+                    hints_processed.append(self.vace(hint, x, **kwargs) if self.block_id == 0 else self.vace(hint, None, **kwargs))
+                     
         latent_frames = e.shape[0]
         e = (self.modulation + e).chunk(6, dim=1)
         # self-attention
@@ -491,11 +509,13 @@ class WanAttentionBlock(nn.Module):
         x.addcmul_(y, e[5])
         x, y = reshape_latent(x , 1), reshape_latent(y , 1)
 
-        if hint is not None:
-            if context_scale == 1:
-                x.add_(hint)
-            else:
-                x.add_(hint, alpha= context_scale)
+        if hints_processed is not None:
+            for hint, scale in zip(hints_processed, context_scale):
+                if scale != 0:
+                    if scale == 1:
+                        x.add_(hint)
+                    else:
+                        x.add_(hint, alpha= scale)
         return x 
 
 
@@ -589,7 +609,28 @@ class MLPProj(torch.nn.Module):
 
 
 class WanModel(ModelMixin, ConfigMixin):
-    def preprocess_loras(self, model_filename, sd):
+    def setup_chipmunk(self):
+        # from chipmunk.util import LayerCounter
+        # from chipmunk.modules import SparseDiffMlp, SparseDiffAttn
+        seq_shape = (21, 45, 80)
+        chipmunk_layers =[]
+        for i in range(self.num_layers):
+            layer_num, layer_counter = LayerCounter.build_for_layer(is_attn_sparse=True, is_mlp_sparse=False)            
+            chipmunk_layers.append( SparseDiffAttn(layer_num, layer_counter))
+        offload.shared_state["_chipmunk_layers"] = chipmunk_layers
+
+        chipmunk_layers[0].initialize_static_mask(
+            seq_shape=seq_shape,
+            txt_len=0,
+            local_heads_num=self.num_heads,
+            device='cuda'
+        )
+        chipmunk_layers[0].layer_counter.reset()
+
+    def release_chipmunk(self):
+        offload.shared_state["_chipmunk_layers"] = None
+
+    def preprocess_loras(self, model_type, sd):
 
         first = next(iter(sd), None)
         if first == None:
@@ -634,7 +675,7 @@ class WanModel(ModelMixin, ConfigMixin):
             new_sd.update(new_alphas)
             sd = new_sd
         from wgp import test_class_i2v 
-        if not test_class_i2v(model_filename):
+        if not test_class_i2v(model_type):
             new_sd = {}
             # convert loras for i2v to t2v
             for k,v in sd.items():
@@ -756,8 +797,8 @@ class WanModel(ModelMixin, ConfigMixin):
             cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                                window_size, qk_norm, cross_attn_norm, eps)
-                for _ in range(num_layers)
+                                window_size, qk_norm, cross_attn_norm, eps, block_no =i)
+                for i in range(num_layers)
             ])
 
         # head
@@ -781,7 +822,7 @@ class WanModel(ModelMixin, ConfigMixin):
             # blocks
             self.blocks = nn.ModuleList([
                 WanAttentionBlock('t2v_cross_attn', self.dim, self.ffn_dim, self.num_heads, self.window_size, self.qk_norm,
-                                    self.cross_attn_norm, self.eps,
+                                    self.cross_attn_norm, self.eps, block_no =i,
                                     block_id=self.vace_layers_mapping[i] if i in self.vace_layers else None)
                 for i in range(self.num_layers)
             ])
@@ -905,7 +946,7 @@ class WanModel(ModelMixin, ConfigMixin):
         t,
         context,
         vace_context = None,
-        vace_context_scale=1.0,        
+        vace_context_scale=[1.0],        
         clip_fea=None,
         y=None,
         freqs = None,
@@ -934,6 +975,10 @@ class WanModel(ModelMixin, ConfigMixin):
         if torch.is_tensor(freqs) and freqs.device != device:
             freqs = freqs.to(device)
 
+        chipmunk = offload.shared_state.get("_chipmunk", False) 
+        if chipmunk:
+            # from chipmunk.ops.voxel import voxel_chunk_no_padding, reverse_voxel_chunk_no_padding
+            voxel_shape = (4, 6, 8)
 
         x_list = x
         joint_pass = len(x_list) > 1
@@ -950,7 +995,12 @@ class WanModel(ModelMixin, ConfigMixin):
                 # embeddings
                 x = self.patch_embedding(x.unsqueeze(0)).to(modulation_dtype)
                 grid_sizes = x.shape[2:]
-                x = x.flatten(2).transpose(1, 2)
+                if chipmunk:
+                    x = x.unsqueeze(-1)
+                    x_og_shape = x.shape
+                    x = voxel_chunk_no_padding(x, voxel_shape).squeeze(-1).transpose(1, 2)
+                else:
+                    x = x.flatten(2).transpose(1, 2)
                 x_list[i] = x
         x, y = None, None
 
@@ -1020,18 +1070,18 @@ class WanModel(ModelMixin, ConfigMixin):
             # Vace embeddings
             c = [self.vace_patch_embedding(u.to(self.vace_patch_embedding.weight.dtype).unsqueeze(0)) for u in vace_context]
             c = [u.flatten(2).transpose(1, 2) for u in c]
-            c = c[0]
- 
+            # c = c[0]
+            c = [ [sub_c] for sub_c in c]
             kwargs['context_scale'] = vace_context_scale
-            hints_list = [ [c] for _ in range(len(x_list)) ] 
+            hints_list = [ c ]* len(x_list) 
             del c
 
         should_calc = True
-        if self.enable_teacache: 
+        if self.enable_cache: 
             if x_id != 0:
                 should_calc = self.should_calc
             else:
-                if current_step <= self.teacache_start_step or current_step == self.num_steps-1:
+                if current_step <= self.cache_start_step or current_step == self.num_steps-1:
                     should_calc = True
                     self.accumulated_rel_l1_distance = 0
                 else:
@@ -1057,7 +1107,7 @@ class WanModel(ModelMixin, ConfigMixin):
                 x += self.previous_residual[x_id]
             x = None
         else:
-            if self.enable_teacache:
+            if self.enable_cache:
                 if joint_pass:
                     self.previous_residual = [ None ] * len(self.previous_residual)
                 else:
@@ -1084,7 +1134,7 @@ class WanModel(ModelMixin, ConfigMixin):
                         del x
                     del context, hints
 
-            if self.enable_teacache:
+            if self.enable_cache:
                 if joint_pass:
                     for i, (x, ori, is_source) in enumerate(zip(x_list, ori_hidden_states, is_source_x)) :
                         if i == 0 or is_source and i != last_x_idx  :
@@ -1101,6 +1151,10 @@ class WanModel(ModelMixin, ConfigMixin):
                 residual, ori_hidden_states = None, None
 
         for i, x in enumerate(x_list):
+            if chipmunk:
+                x = reverse_voxel_chunk_no_padding(x.transpose(1, 2).unsqueeze(-1), x_og_shape, voxel_shape).squeeze(-1)
+                x = x.flatten(2).transpose(1, 2)
+
             # head
             x = self.head(x, e)
 
