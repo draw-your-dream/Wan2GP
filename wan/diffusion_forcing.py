@@ -19,6 +19,7 @@ from wan.utils.utils import calculate_new_dimensions
 from .utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
                                get_sampling_sigmas, retrieve_timesteps)
 from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from wgp import update_loras_slists
 
 class DTT2V:
 
@@ -44,7 +45,7 @@ class DTT2V:
         self.dtype = dtype
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
-
+        self.text_len = config.text_len 
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -216,6 +217,7 @@ class DTT2V:
         slg_start = 0.0,
         slg_end = 1.0,
         callback = None,
+        loras_slists = None,
         **bbargs
     ):
         self._interrupt = False
@@ -248,11 +250,15 @@ class DTT2V:
 
         if self._interrupt:
             return None
+        text_len = self.text_len
         prompt_embeds = self.text_encoder([input_prompt], self.device)[0]
         prompt_embeds  = prompt_embeds.to(self.dtype).to(self.device)
+        prompt_embeds = torch.cat([prompt_embeds, prompt_embeds.new_zeros(text_len -prompt_embeds.size(0), prompt_embeds.size(1)) ]).unsqueeze(0) 
+
         if self.do_classifier_free_guidance:
             negative_prompt_embeds = self.text_encoder([n_prompt], self.device)[0]
             negative_prompt_embeds  = negative_prompt_embeds.to(self.dtype).to(self.device)
+            negative_prompt_embeds = torch.cat([negative_prompt_embeds, negative_prompt_embeds.new_zeros(text_len -negative_prompt_embeds.size(0), negative_prompt_embeds.size(1)) ]).unsqueeze(0) 
 
         if self._interrupt:
             return None
@@ -316,8 +322,9 @@ class DTT2V:
 
         updated_num_steps=  len(step_matrix)
         if callback != None:
+            update_loras_slists(self.model, loras_slists, updated_num_steps)
             callback(-1, None, True, override_num_inference_steps = updated_num_steps)
-        if self.model.enable_cache:
+        if self.model.enable_cache == "tea":
             x_count = 2 if self.do_classifier_free_guidance else 1
             self.model.previous_residual = [None] * x_count 
             time_steps_comb = []
@@ -328,8 +335,10 @@ class DTT2V:
                 if overlap_noise > 0 and valid_interval_start < predix_video_latent_length:
                     timestep[:, valid_interval_start:predix_video_latent_length] = overlap_noise
                 time_steps_comb.append(timestep)
-            self.model.compute_teacache_threshold(self.model.cache_start_step, time_steps_comb, self.model.teacache_multiplier)
+            self.model.compute_teacache_threshold(self.model.cache_start_step, time_steps_comb, self.model.cache_multiplier)
             del time_steps_comb
+        else:
+            self.model.enable_cache = None
         from mmgp import offload
         freqs = get_rotary_pos_embed(latents.shape[1 :], enable_RIFLEx= False) 
         kwrags = {

@@ -1,4 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
+# I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
+# Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 import math
 from einops import rearrange
 import torch
@@ -11,6 +14,7 @@ from typing import Union,Optional
 from mmgp import offload
 from .attention import pay_attention
 from torch.backends.cuda import sdp_kernel
+from wan.multitalk.multitalk_utils import get_attn_map_with_target
 
 __all__ = ['WanModel']
 
@@ -175,7 +179,71 @@ class WanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
 
-    def forward(self, xlist, grid_sizes, freqs, block_mask = None):
+    def text_cross_attention(self, xlist, context, return_q = False):
+        x = xlist[0]
+        xlist.clear()
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+        nag_scale = offload.shared_state.get("_nag_scale",0)
+        # compute query, key, value
+        q = self.q(x)
+        del x
+        self.norm_q(q)
+        q= q.view(b, -1, n, d)
+        k = self.k(context)
+        self.norm_k(k)
+        k = k.view(context.shape[0], -1, n, d)
+        v = self.v(context).view(context.shape[0], -1, n, d)
+
+        if nag_scale <= 1 or len(k)==1:
+            qvl_list=[q, k, v]
+            if not return_q: del q
+            del k, v
+            x = pay_attention(qvl_list,  cross_attn= True)
+            x = x.flatten(2, 3)
+        else:
+            nag_tau = offload.shared_state["_nag_tau"]
+            nag_alpha = offload.shared_state["_nag_alpha"]
+            qvl_list=[q, k[:1], v[:1]]
+            x_pos = pay_attention(qvl_list,  cross_attn= True)
+            qvl_list=[q, k[1:], v[1:]]
+            if not return_q: del q
+            del k, v
+            x_neg = pay_attention(qvl_list,  cross_attn= True)
+
+            x_pos = x_pos.flatten(2, 3)
+            x_neg = x_neg.flatten(2, 3)
+            # Behold DeepBeepMeep as the NAG Butcher !: reduce highly VRAM consumption while at the same time turn the source in gibberish
+            x_neg.mul_(1-nag_scale)
+            x_neg.add_(x_pos, alpha= nag_scale)
+            x_guidance = x_neg
+            del x_neg
+            norm_positive = torch.norm(x_pos, p=1, dim=-1, keepdim=True)
+            norm_guidance = torch.norm(x_guidance, p=1, dim=-1, keepdim=True)
+            scale = norm_guidance / norm_positive
+            scale = torch.nan_to_num(scale, 10)
+            factor = 1 / (norm_guidance + 1e-7) * norm_positive * nag_tau
+            x_guidance = torch.where(scale > nag_tau, x_guidance * factor, x_guidance )
+            del norm_positive, norm_guidance 
+            x_pos.mul_(1 - nag_alpha)
+            x_guidance.mul_(nag_alpha)
+            x_guidance.add_(x_pos)
+            x = x_guidance
+
+            # x_guidance = x_pos * nag_scale - x_neg * (nag_scale - 1)
+            # norm_positive = torch.norm(x_pos, p=1, dim=-1, keepdim=True).expand(*x_pos.shape)
+            # norm_guidance = torch.norm(x_guidance, p=1, dim=-1, keepdim=True).expand(*x_guidance.shape)
+
+            # scale = norm_guidance / norm_positive
+            # scale = torch.nan_to_num(scale, 10)
+            # x_guidance[scale > nag_tau] =  x_guidance[scale > nag_tau] / (norm_guidance[scale > nag_tau] + 1e-7) * norm_positive[scale > nag_tau] * nag_tau
+
+            # x = x_guidance * nag_alpha + x_pos * (1 - nag_alpha)
+        if return_q:
+            return x, q
+        else:
+            return x, None
+    
+    def forward(self, xlist, grid_sizes, freqs, block_mask = None, ref_target_masks = None, ref_images_count = 0):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -190,7 +258,7 @@ class WanSelfAttention(nn.Module):
         # query, key, value function
         q = self.q(x)
         self.norm_q(q)
-        q = q.view(b, s, n, d) # !!!
+        q = q.view(b, s, n, d) 
         k = self.k(x)
         self.norm_k(k)
         k = k.view(b, s, n, d) 
@@ -200,6 +268,12 @@ class WanSelfAttention(nn.Module):
         del q,k
 
         q,k = apply_rotary_emb(qklist, freqs, head_first=False)
+
+        if ref_target_masks != None:
+            x_ref_attn_map = get_attn_map_with_target(q, k , grid_sizes, ref_target_masks=ref_target_masks, ref_images_count = ref_images_count)
+        else:
+            x_ref_attn_map = None
+
         chipmunk = offload.shared_state.get("_chipmunk", False) 
         if chipmunk and self.__class__ == WanSelfAttention:
             q = q.transpose(1,2)
@@ -225,30 +299,10 @@ class WanSelfAttention(nn.Module):
                 )
                 del q,k,v
 
-        # if not self._flag_ar_attention:
-        #     q = rope_apply(q, grid_sizes, freqs)
-        #     k = rope_apply(k, grid_sizes, freqs)
-        #     x = flash_attention(q=q, k=k, v=v, window_size=self.window_size)
-        # else:
-        #     q = rope_apply(q, grid_sizes, freqs)
-        #     k = rope_apply(k, grid_sizes, freqs)
-        #     q = q.to(torch.bfloat16)
-        #     k = k.to(torch.bfloat16)
-        #     v = v.to(torch.bfloat16)
 
-        #     with sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
-        #         x = (
-        #             torch.nn.functional.scaled_dot_product_attention(
-        #                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=block_mask
-        #             )
-        #             .transpose(1, 2)
-        #             .contiguous()
-        #         )
-
-        # output
         x = x.flatten(2)
         x = self.o(x)
-        return x
+        return x, x_ref_attn_map
 
 
 class WanT2VCrossAttention(WanSelfAttention):
@@ -259,28 +313,7 @@ class WanT2VCrossAttention(WanSelfAttention):
             x(Tensor): Shape [B, L1, C]
             context(Tensor): Shape [B, L2, C]
         """
-        x = xlist[0]
-        xlist.clear()
-        b, n, d = x.size(0), self.num_heads, self.head_dim
-
-        # compute query, key, value
-        q = self.q(x)
-        del x
-        self.norm_q(q)
-        q= q.view(b, -1, n, d)
-        k = self.k(context)
-        self.norm_k(k)
-        k = k.view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
-
-        # compute attention
-        v = v.contiguous().clone()
-        qvl_list=[q, k, v]
-        del q, k, v
-        x = pay_attention(qvl_list,  cross_attn= True)
-
-        # output
-        x = x.flatten(2)
+        x, _ = self.text_cross_attention( xlist, context)
         x = self.o(x)
         return x
 
@@ -308,30 +341,14 @@ class WanI2VCrossAttention(WanSelfAttention):
             context(Tensor): Shape [B, L2, C]
         """
 
-        ##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
-        # I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
-        # Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
-
-        x = xlist[0]
-        xlist.clear()
 
         context_img = context[:, :257]
         context = context[:, 257:]
-        b, n, d = x.size(0), self.num_heads, self.head_dim
-
-        # compute query, key, value
-        q = self.q(x)
-        del x
-        self.norm_q(q)
-        q= q.view(b, -1, n, d)
-        k = self.k(context)
-        self.norm_k(k)
-        k = k.view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
-
-        qkv_list = [q, k, v]
-        del k,v
-        x = pay_attention(qkv_list)
+        
+        x, q = self.text_cross_attention( xlist, context, return_q = True)
+        if len(q) != len(context_img):
+            context_img = context_img[:len(q)]
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         if audio_scale != None:
             audio_x = self.processor(q, audio_proj, grid_sizes[0], audio_context_lens)
@@ -342,12 +359,9 @@ class WanI2VCrossAttention(WanSelfAttention):
         qkv_list = [q, k_img, v_img]
         del q, k_img, v_img
         img_x = pay_attention(qkv_list)
-        # compute attention
-
+        img_x = img_x.flatten(2)
 
         # output
-        x = x.flatten(2)
-        img_x = img_x.flatten(2)
         x += img_x
         del img_x
         if audio_scale != None:
@@ -375,7 +389,11 @@ class WanAttentionBlock(nn.Module):
                  cross_attn_norm=False,
                  eps=1e-6,
                  block_id=None,
-                 block_no = 0
+                 block_no = 0,                 
+                 output_dim=0,
+                 norm_input_visual=True,
+                 class_range=24,
+                 class_interval=4,
                  ):
         super().__init__()
         self.dim = dim
@@ -409,6 +427,22 @@ class WanAttentionBlock(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
         self.block_id = block_id
 
+        if output_dim > 0:
+            from wan.multitalk.attention import SingleStreamMutiAttention 
+            # init audio module
+            self.audio_cross_attn = SingleStreamMutiAttention(
+                    dim=dim,
+                    encoder_hidden_states_dim=output_dim,
+                    num_heads=num_heads,
+                    qk_norm=False,
+                    qkv_bias=True,
+                    eps=eps,
+                    norm_layer=WanRMSNorm,
+                    class_range=class_range,
+                    class_interval=class_interval
+                )
+            self.norm_x = WanLayerNorm(dim, eps, elementwise_affine=True)  if norm_input_visual else nn.Identity()
+    
     def forward(
         self,
         x,
@@ -423,6 +457,9 @@ class WanAttentionBlock(nn.Module):
         audio_proj= None,
         audio_context_lens= None,
         audio_scale=None,
+        multitalk_audio=None,
+        multitalk_masks=None,
+        ref_images_count=0,
     ):
         r"""
         Args:
@@ -466,11 +503,10 @@ class WanAttentionBlock(nn.Module):
 
         xlist = [x_mod.to(attention_dtype)]
         del x_mod
-        y = self.self_attn( xlist, grid_sizes, freqs, block_mask)
+        y, x_ref_attn_map = self.self_attn( xlist, grid_sizes, freqs, block_mask = block_mask, ref_target_masks = multitalk_masks, ref_images_count = ref_images_count)
         y = y.to(dtype)
 
-        if cam_emb != None: 
-            y = self.projector(y)
+        if cam_emb != None: y = self.projector(y)
 
         x, y = reshape_latent(x , latent_frames), reshape_latent(y , latent_frames)
         x.addcmul_(y, e[2])
@@ -481,6 +517,25 @@ class WanAttentionBlock(nn.Module):
         ylist= [y]
         del y
         x += self.cross_attn(ylist, context, grid_sizes, audio_proj, audio_scale, audio_context_lens).to(dtype)
+
+        if multitalk_audio != None:
+            # cross attn of multitalk audio
+            y = self.norm_x(x)
+            y = y.to(attention_dtype)
+            if ref_images_count == 0:
+                x += self.audio_cross_attn(y, encoder_hidden_states=multitalk_audio, shape=grid_sizes, x_ref_attn_map=x_ref_attn_map)
+            else:
+                y_shape = y.shape
+                y = y.reshape(y_shape[0], grid_sizes[0], -1)
+                y = y[:, ref_images_count:]
+                y = y.reshape(y_shape[0], -1, y_shape[-1])
+                grid_sizes_alt = [grid_sizes[0]-ref_images_count, *grid_sizes[1:]]
+                y = self.audio_cross_attn(y, encoder_hidden_states=multitalk_audio, shape=grid_sizes_alt, x_ref_attn_map=x_ref_attn_map)
+                y = y.reshape(y_shape[0], grid_sizes[0]-ref_images_count, -1)
+                x = x.reshape(y_shape[0], grid_sizes[0], -1)
+                x[:, ref_images_count:] += y
+                x = x.reshape(y_shape[0], -1, y_shape[-1])
+            del y
 
         y = self.norm2(x)
 
@@ -517,6 +572,71 @@ class WanAttentionBlock(nn.Module):
                     else:
                         x.add_(hint, alpha= scale)
         return x 
+
+class AudioProjModel(ModelMixin, ConfigMixin):
+    def __init__(
+        self,
+        seq_len=5,
+        seq_len_vf=12,
+        blocks=12,  
+        channels=768, 
+        intermediate_dim=512,
+        output_dim=768,
+        context_tokens=32,
+        norm_output_audio=False,
+    ):
+        super().__init__()
+
+        self.seq_len = seq_len
+        self.blocks = blocks
+        self.channels = channels
+        self.input_dim = seq_len * blocks * channels  
+        self.input_dim_vf = seq_len_vf * blocks * channels
+        self.intermediate_dim = intermediate_dim
+        self.context_tokens = context_tokens
+        self.output_dim = output_dim
+
+        # define multiple linear layers
+        self.proj1 = nn.Linear(self.input_dim, intermediate_dim)
+        self.proj1_vf = nn.Linear(self.input_dim_vf, intermediate_dim)
+        self.proj2 = nn.Linear(intermediate_dim, intermediate_dim)
+        self.proj3 = nn.Linear(intermediate_dim, context_tokens * output_dim)
+        self.norm = nn.LayerNorm(output_dim) if norm_output_audio else nn.Identity()
+
+    def forward(self, audio_embeds, audio_embeds_vf):
+        video_length = audio_embeds.shape[1] + audio_embeds_vf.shape[1]
+        B, _, _, S, C = audio_embeds.shape
+
+        # process audio of first frame
+        audio_embeds = rearrange(audio_embeds, "bz f w b c -> (bz f) w b c")
+        batch_size, window_size, blocks, channels = audio_embeds.shape
+        audio_embeds = audio_embeds.view(batch_size, window_size * blocks * channels)
+
+        # process audio of latter frame
+        audio_embeds_vf = rearrange(audio_embeds_vf, "bz f w b c -> (bz f) w b c")
+        batch_size_vf, window_size_vf, blocks_vf, channels_vf = audio_embeds_vf.shape
+        audio_embeds_vf = audio_embeds_vf.view(batch_size_vf, window_size_vf * blocks_vf * channels_vf)
+
+        # first projection
+        audio_embeds = torch.relu(self.proj1(audio_embeds)) 
+        audio_embeds_vf = torch.relu(self.proj1_vf(audio_embeds_vf)) 
+        audio_embeds = rearrange(audio_embeds, "(bz f) c -> bz f c", bz=B)
+        audio_embeds_vf = rearrange(audio_embeds_vf, "(bz f) c -> bz f c", bz=B)
+        audio_embeds_c = torch.concat([audio_embeds, audio_embeds_vf], dim=1) 
+        audio_embeds_vf = audio_embeds = None
+        batch_size_c, N_t, C_a = audio_embeds_c.shape
+        audio_embeds_c = audio_embeds_c.view(batch_size_c*N_t, C_a)
+
+        # second projection
+        audio_embeds_c = torch.relu(self.proj2(audio_embeds_c))
+
+        context_tokens = self.proj3(audio_embeds_c).reshape(batch_size_c*N_t, self.context_tokens, self.output_dim)
+        audio_embeds_c = None
+        # normalization and reshape
+        context_tokens = self.norm(context_tokens)
+        context_tokens = rearrange(context_tokens, "(bz f) m c -> bz f m c", f=video_length)
+
+        return context_tokens
 
 
 
@@ -595,18 +715,26 @@ class Head(nn.Module):
 
 class MLPProj(torch.nn.Module):
 
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, in_dim, out_dim, flf_pos_emb=False):
         super().__init__()
 
         self.proj = torch.nn.Sequential(
             torch.nn.LayerNorm(in_dim), torch.nn.Linear(in_dim, in_dim),
             torch.nn.GELU(), torch.nn.Linear(in_dim, out_dim),
             torch.nn.LayerNorm(out_dim))
+        
+        if flf_pos_emb:  # NOTE: we only use this for `flf2v`
+            FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER = 257 * 2
+            self.emb_pos = nn.Parameter(
+                torch.zeros(1, FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER, 1280))
 
     def forward(self, image_embeds):
+        if hasattr(self, 'emb_pos'):
+            bs, n, d = image_embeds.shape
+            image_embeds = image_embeds.view(-1, 2 * n, d)
+            image_embeds = image_embeds + self.emb_pos
         clip_extra_context_tokens = self.proj(image_embeds)
         return clip_extra_context_tokens
-
 
 class WanModel(ModelMixin, ConfigMixin):
     def setup_chipmunk(self):
@@ -646,6 +774,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
             for k,v in sd.items():
                 k = k.replace("lora_unet_blocks_","diffusion_model.blocks.")
+                k = k.replace("lora_unet__blocks_","diffusion_model.blocks.")
 
                 for s,t in zip(src_list, tgt_list):
                     k = k.replace(s,t)
@@ -653,33 +782,15 @@ class WanModel(ModelMixin, ConfigMixin):
                 k = k.replace("lora_up","lora_B")
                 k = k.replace("lora_down","lora_A")
 
-                if "alpha" in k:
-                    alphas[k] = v
-                else:
-                    new_sd[k] = v
+                new_sd[k] = v
 
-            new_alphas = {}
-            for k,v in new_sd.items():
-                if "lora_B" in k:
-                    dim = v.shape[1]
-                elif "lora_A" in k:
-                    dim = v.shape[0]
-                else:
-                    continue
-                alpha_key = k[:-len("lora_X.weight")] +"alpha"
-                if alpha_key in alphas:
-                    scale = alphas[alpha_key] / dim
-                    new_alphas[alpha_key] = scale
-                else:
-                    print(f"Lora alpha'{alpha_key}' is missing")
-            new_sd.update(new_alphas)
             sd = new_sd
         from wgp import test_class_i2v 
         if not test_class_i2v(model_type):
             new_sd = {}
             # convert loras for i2v to t2v
             for k,v in sd.items():
-                if  any(layer in k for layer in ["cross_attn.k_img", "cross_attn.v_img"]):
+                if  any(layer in k for layer in ["cross_attn.k_img", "cross_attn.v_img", "img_emb."]):
                     continue
                 new_sd[k] = v
             sd = new_sd
@@ -713,45 +824,18 @@ class WanModel(ModelMixin, ConfigMixin):
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6,
+                 flf = False,
                  recammaster = False,
                  inject_sample_info = False,
                  fantasytalking_dim = 0,
+                 multitalk_output_dim = 0,
+                 audio_window=5,
+                 intermediate_dim=512,
+                 context_tokens=32,
+                 vae_scale=4, # vae timedownsample scale
+                 norm_input_visual=True,
+                 norm_output_audio=True,
                  ):
-        r"""
-        Initialize the diffusion model backbone.
-
-        Args:
-            model_type (`str`, *optional*, defaults to 't2v'):
-                Model variant - 't2v' (text-to-video) or 'i2v' (image-to-video)
-            patch_size (`tuple`, *optional*, defaults to (1, 2, 2)):
-                3D patch dimensions for video embedding (t_patch, h_patch, w_patch)
-            text_len (`int`, *optional*, defaults to 512):
-                Fixed length for text embeddings
-            in_dim (`int`, *optional*, defaults to 16):
-                Input video channels (C_in)
-            dim (`int`, *optional*, defaults to 2048):
-                Hidden dimension of the transformer
-            ffn_dim (`int`, *optional*, defaults to 8192):
-                Intermediate dimension in feed-forward network
-            freq_dim (`int`, *optional*, defaults to 256):
-                Dimension for sinusoidal time embeddings
-            text_dim (`int`, *optional*, defaults to 4096):
-                Input dimension for text embeddings
-            out_dim (`int`, *optional*, defaults to 16):
-                Output video channels (C_out)
-            num_heads (`int`, *optional*, defaults to 16):
-                Number of attention heads
-            num_layers (`int`, *optional*, defaults to 32):
-                Number of transformer blocks
-            window_size (`tuple`, *optional*, defaults to (-1, -1)):
-                Window size for local attention (-1 indicates global attention)
-            qk_norm (`bool`, *optional*, defaults to True):
-                Enable query/key normalization
-            cross_attn_norm (`bool`, *optional*, defaults to False):
-                Enable cross-attention normalization
-            eps (`float`, *optional*, defaults to 1e-6):
-                Epsilon value for normalization layers
-        """
 
         super().__init__()
 
@@ -777,6 +861,14 @@ class WanModel(ModelMixin, ConfigMixin):
         self.block_mask = None
         self.inject_sample_info = inject_sample_info
 
+        self.norm_output_audio = norm_output_audio
+        self.audio_window = audio_window
+        self.intermediate_dim = intermediate_dim
+        self.vae_scale = vae_scale
+
+        multitalk = multitalk_output_dim > 0
+        self.multitalk = multitalk
+
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -797,7 +889,7 @@ class WanModel(ModelMixin, ConfigMixin):
             cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                                window_size, qk_norm, cross_attn_norm, eps, block_no =i)
+                                window_size, qk_norm, cross_attn_norm, eps, block_no =i, output_dim=multitalk_output_dim, norm_input_visual=norm_input_visual)
                 for i in range(num_layers)
             ])
 
@@ -807,7 +899,18 @@ class WanModel(ModelMixin, ConfigMixin):
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
 
         if model_type == 'i2v':
-            self.img_emb = MLPProj(1280, dim)
+            self.img_emb = MLPProj(1280, dim, flf_pos_emb = flf)
+
+        if multitalk :
+            # init audio adapter
+            self.audio_proj = AudioProjModel(
+                        seq_len=audio_window,
+                        seq_len_vf=audio_window+vae_scale-1,
+                        intermediate_dim=intermediate_dim,
+                        output_dim=multitalk_output_dim,
+                        context_tokens=context_tokens,
+                        norm_output_audio=norm_output_audio,
+                    )
 
         # initialize weights
         self.init_weights()
@@ -823,7 +926,10 @@ class WanModel(ModelMixin, ConfigMixin):
             self.blocks = nn.ModuleList([
                 WanAttentionBlock('t2v_cross_attn', self.dim, self.ffn_dim, self.num_heads, self.window_size, self.qk_norm,
                                     self.cross_attn_norm, self.eps, block_no =i,
-                                    block_id=self.vace_layers_mapping[i] if i in self.vace_layers else None)
+                                    block_id=self.vace_layers_mapping[i] if i in self.vace_layers else None,
+                                    output_dim=multitalk_output_dim,
+                                    norm_input_visual=norm_input_visual,
+                                    )
                 for i in range(self.num_layers)
             ])
 
@@ -849,7 +955,7 @@ class WanModel(ModelMixin, ConfigMixin):
                 block.projector.bias = nn.Parameter(torch.zeros(dim))            
 
         if fantasytalking_dim > 0:
-            from fantasytalking.model import WanCrossAttentionProcessor
+            from wan.fantasytalking.model import WanCrossAttentionProcessor
             for block in self.blocks:
                 block.cross_attn.processor = WanCrossAttentionProcessor(fantasytalking_dim, dim)
 
@@ -863,6 +969,10 @@ class WanModel(ModelMixin, ConfigMixin):
 
         for block in self.blocks:
             layer_list2 += [block.norm3]
+
+        if hasattr(self, "audio_proj"):
+            for block in self.blocks:
+                layer_list2 += [block.norm_x]
 
         if hasattr(self, "fps_embedding"):
             layer_list2 += [self.fps_embedding, self.fps_projection, self.fps_projection[0], self.fps_projection[2]]
@@ -891,6 +1001,66 @@ class WanModel(ModelMixin, ConfigMixin):
 
         self._lock_dtype = dtype
 
+    def compute_magcache_threshold(self, start_step, timesteps = None, speed_factor =0):
+        def nearest_interp(src_array, target_length):
+            src_length = len(src_array)
+            if target_length == 1: return np.array([src_array[-1]])
+            scale = (src_length - 1) / (target_length - 1)
+            mapped_indices = np.round(np.arange(target_length) * scale).astype(int)
+            return src_array[mapped_indices]
+        num_inference_steps = len(timesteps)
+        if len(self.def_mag_ratios) != num_inference_steps*2:
+            mag_ratio_con = nearest_interp(self.def_mag_ratios[0::2], num_inference_steps)
+            mag_ratio_ucon = nearest_interp(self.def_mag_ratios[1::2], num_inference_steps)
+            interpolated_mag_ratios = np.concatenate([mag_ratio_con.reshape(-1, 1), mag_ratio_ucon.reshape(-1, 1)], axis=1).reshape(-1)
+            self.mag_ratios = interpolated_mag_ratios
+        else:
+            self.mag_ratios = self.def_mag_ratios
+
+
+        best_deltas = None
+        best_threshold = 0.01
+        best_diff = 1000
+        best_signed_diff = 1000
+        target_nb_steps= int(len(timesteps) / speed_factor)
+        threshold = 0.01
+        x_id_max = 1
+        while threshold <= 0.6:
+            nb_steps = 0
+            diff = 1000
+            accumulated_err, accumulated_steps, accumulated_ratio = [0] * x_id_max , [0] * x_id_max, [1.0] * x_id_max
+            for i, t in enumerate(timesteps):
+                if i<=start_step:
+                    skip  = False
+                    x_should_calc = [True] * x_id_max
+                else:
+                    x_should_calc = []
+                    for cur_x_id in range(x_id_max):
+                        cur_mag_ratio = self.mag_ratios[i * 2 + cur_x_id] # conditional and unconditional in one list
+                        accumulated_ratio[cur_x_id] *= cur_mag_ratio # magnitude ratio between current step and the cached step
+                        accumulated_steps[cur_x_id] += 1 # skip steps plus 1
+                        cur_skip_err = np.abs(1-accumulated_ratio[cur_x_id]) # skip error of current steps
+                        accumulated_err[cur_x_id] += cur_skip_err # accumulated error of multiple steps
+                        if accumulated_err[cur_x_id]<threshold and accumulated_steps[cur_x_id]<=self.magcache_K:
+                            skip  = True
+                        else:
+                            skip  = False
+                            accumulated_err[cur_x_id], accumulated_steps[cur_x_id], accumulated_ratio[cur_x_id] = 0, 0, 1.0
+                        x_should_calc.append(not skip)
+                if not skip:
+                    nb_steps += 1
+                    signed_diff = target_nb_steps - nb_steps               
+                    diff = abs(signed_diff)  
+            if diff < best_diff:
+                best_threshold = threshold
+                best_diff = diff
+                best_signed_diff = signed_diff
+            elif diff > best_diff:
+                break
+            threshold += 0.01
+        self.magcache_thresh = best_threshold
+        print(f"Mag Cache, best threshold found:{best_threshold:0.2f} with gain x{len(timesteps)/(target_nb_steps - best_signed_diff):0.2f} for a target of x{speed_factor}")
+        return best_threshold
 
     def compute_teacache_threshold(self, start_step, timesteps = None, speed_factor =0): 
         modulation_dtype = self.time_projection[1].weight.dtype
@@ -963,6 +1133,9 @@ class WanModel(ModelMixin, ConfigMixin):
         audio_proj=None,
         audio_context_lens=None,
         audio_scale=None,
+        multitalk_audio = None,
+        multitalk_masks = None,
+        ref_images_count = 0,    
 
     ):
         # patch_dtype =  self.patch_embedding.weight.dtype
@@ -1041,13 +1214,34 @@ class WanModel(ModelMixin, ConfigMixin):
                 e0 = e0 + self.fps_projection(fps_emb).unflatten(1, (6, self.dim))
 
         # context
-        context = [self.text_embedding( torch.cat( [u, u.new_zeros(self.text_len - u.size(0), u.size(1))] ).unsqueeze(0) ) for u in context  ] 
+        context = [self.text_embedding( u ) for u in context  ] 
         
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
-            context = [ torch.cat( [context_clip, u ], dim=1 ) for u in context  ] 
+            context_list = []
+            for one_context in context: 
+                if len(one_context) != len(context_clip):
+                    context_list.append( torch.cat( [context_clip.repeat(len(one_context), 1, 1), one_context ], dim=1 ))
+                else:
+                    context_list.append( torch.cat( [context_clip, one_context ], dim=1 ))
+        else:
+            context_list = context
 
-        context_list = context
+        if multitalk_audio != None:
+            multitalk_audio_list = []
+            for audio in multitalk_audio:
+                audio = self.audio_proj(*audio) 
+                audio = torch.concat(audio.split(1), dim=2).to(context[0])
+                multitalk_audio_list.append(audio)
+            audio = None
+        else:
+            multitalk_audio_list = [None] * len(x_list)
+
+        if multitalk_masks != None:
+            multitalk_masks_list = multitalk_masks
+        else:
+            multitalk_masks_list = [None] * len(x_list)
+
         if audio_scale != None: 
             audio_scale_list = audio_scale
         else:
@@ -1062,6 +1256,7 @@ class WanModel(ModelMixin, ConfigMixin):
             block_mask = block_mask,
             audio_proj=audio_proj,
             audio_context_lens=audio_context_lens,
+            ref_images_count=ref_images_count,
             )
 
         if vace_context == None:
@@ -1070,53 +1265,87 @@ class WanModel(ModelMixin, ConfigMixin):
             # Vace embeddings
             c = [self.vace_patch_embedding(u.to(self.vace_patch_embedding.weight.dtype).unsqueeze(0)) for u in vace_context]
             c = [u.flatten(2).transpose(1, 2) for u in c]
-            # c = c[0]
-            c = [ [sub_c] for sub_c in c]
             kwargs['context_scale'] = vace_context_scale
-            hints_list = [ c ]* len(x_list) 
+            hints_list = [ [ [sub_c] for sub_c in c] for _ in range(len(x_list)) ] 
             del c
-
         should_calc = True
-        if self.enable_cache: 
-            if x_id != 0:
-                should_calc = self.should_calc
-            else:
-                if current_step <= self.cache_start_step or current_step == self.num_steps-1:
+        x_should_calc = None
+        if self.enable_cache != None: 
+            if self.enable_cache == "mag":
+                if current_step <= self.cache_start_step:
                     should_calc = True
-                    self.accumulated_rel_l1_distance = 0
+                elif self.one_for_all and x_id != 0: # not joint pass, not main pas, one for all
+                    assert len(x_list) == 1
+                    should_calc = self.should_calc
                 else:
-                    rescale_func = np.poly1d(self.coefficients)
-                    delta = abs(rescale_func(((e-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item()))
-                    self.accumulated_rel_l1_distance += delta
-                    if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
-                        should_calc = False
-                        self.teacache_skipped_steps += 1
-                        # print(f"Teacache Skipped Step no {current_step} ({self.teacache_skipped_steps}/{current_step}), delta={delta}" )
-                    else:
+                    x_should_calc = []
+                    for i in range(1 if self.one_for_all else len(x_list)):
+                        cur_x_id = i if joint_pass else x_id  
+                        cur_mag_ratio = self.mag_ratios[current_step * 2 + cur_x_id] # conditional and unconditional in one list
+                        self.accumulated_ratio[cur_x_id] *= cur_mag_ratio # magnitude ratio between current step and the cached step
+                        self.accumulated_steps[cur_x_id] += 1 # skip steps plus 1
+                        cur_skip_err = np.abs(1-self.accumulated_ratio[cur_x_id]) # skip error of current steps
+                        self.accumulated_err[cur_x_id] += cur_skip_err # accumulated error of multiple steps
+                        if self.accumulated_err[cur_x_id]<self.magcache_thresh and self.accumulated_steps[cur_x_id]<=self.magcache_K:
+                            skip_forward = True
+                            if i == 0 and x_id == 0: self.cache_skipped_steps += 1
+                            # print(f"skip: step={current_step} for x_id={cur_x_id}, accum error {self.accumulated_err[cur_x_id]}")
+                        else:
+                            skip_forward = False
+                            self.accumulated_err[cur_x_id], self.accumulated_steps[cur_x_id], self.accumulated_ratio[cur_x_id] = 0, 0, 1.0
+                        x_should_calc.append(not skip_forward)
+                    if self.one_for_all:
+                        should_calc = self.should_calc = x_should_calc[0] 
+                        x_should_calc = None
+            else:
+                if x_id != 0:
+                    should_calc = self.should_calc
+                else:
+                    if current_step <= self.cache_start_step or current_step == self.num_steps-1:
                         should_calc = True
                         self.accumulated_rel_l1_distance = 0
-                self.previous_modulated_input = e 
-                self.should_calc = should_calc                        
+                    else:
+                        rescale_func = np.poly1d(self.coefficients)
+                        delta = abs(rescale_func(((e-self.previous_modulated_input).abs().mean() / self.previous_modulated_input.abs().mean()).cpu().item()))
+                        self.accumulated_rel_l1_distance += delta
+                        if self.accumulated_rel_l1_distance < self.rel_l1_thresh:
+                            should_calc = False
+                            self.cache_skipped_steps += 1
+                            # print(f"Teacache Skipped Step no {current_step} ({self.cache_skipped_steps}/{current_step}), delta={delta}" )
+                        else:
+                            should_calc = True
+                            self.accumulated_rel_l1_distance = 0
+                    self.previous_modulated_input = e 
+                    self.should_calc = should_calc
 
-        if not should_calc:
+        if x_should_calc  == None: x_should_calc = [should_calc] * len(x_list) 
+
+        if joint_pass:
+            for i, x in enumerate(x_list):
+                if not x_should_calc[i]: x += self.previous_residual[i]
+        elif not x_should_calc[0]:
+            x = x_list[0]
+            x += self.previous_residual[x_id]
+        x = None
+
+        if self.enable_cache != None:
+            if self.previous_residual == None: self.previous_residual = [ None ] * len(self.previous_residual)
+
             if joint_pass:
-                for i, x in enumerate(x_list):
-                    x += self.previous_residual[i]
-            else:
-                x = x_list[0]
-                x += self.previous_residual[x_id]
-            x = None
-        else:
-            if self.enable_cache:
-                if joint_pass:
-                    self.previous_residual = [ None ] * len(self.previous_residual)
-                else:
-                    self.previous_residual[x_id] = None
-                ori_hidden_states = [ None ] * len(x_list)
+                for i, should_calc in enumerate(x_should_calc):
+                    if should_calc: self.previous_residual[i] = None
+            elif x_should_calc[0]:
+                self.previous_residual[x_id] = None
+            ori_hidden_states = [ None ] * len(x_list)
+            if all(x_should_calc):
                 ori_hidden_states[0] = x_list[0].clone()
                 for i in range(1, len(x_list)):
-                    ori_hidden_states[i] = ori_hidden_states[0] if is_source_x[i] else x_list[i].clone()  
-            
+                    ori_hidden_states[i] = ori_hidden_states[0] if is_source_x[i] else x_list[i].clone()
+            else:
+                for i in range(len(x_list)):
+                    if x_should_calc[i]: ori_hidden_states[i] = x_list[i].clone()
+
+        if any(x_should_calc):
             for block_idx, block in enumerate(self.blocks):
                 offload.shared_state["layer"] = block_idx
                 if callback != None:
@@ -1124,18 +1353,23 @@ class WanModel(ModelMixin, ConfigMixin):
                 if pipeline._interrupt:
                     return [None] * len(x_list)
 
-                if (x_id != 0 or joint_pass) and slg_layers is not None and block_idx in slg_layers:
-                    if not joint_pass:
-                        continue
-                    x_list[0] = block(x_list[0], context = context_list[0], e= e0, **kwargs)
-                else:
-                    for i, (x, context, hints, audio_scale) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list)):
-                        x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, e= e0, **kwargs)
-                        del x
-                    del context, hints
+                # if (x_id != 0 or joint_pass) and slg_layers is not None and block_idx in slg_layers:
+                #     if not joint_pass or not x_should_calc[0]:
 
-            if self.enable_cache:
-                if joint_pass:
+                if slg_layers is not None and block_idx in slg_layers:
+                    if x_id != 0 or not x_should_calc[0]:
+                        continue
+                    x_list[0] = block(x_list[0], context = context_list[0], audio_scale= audio_scale_list[0], e= e0, **kwargs)
+                else:
+                    for i, (x, context, hints, audio_scale, multitalk_audio, multitalk_masks, should_calc) in enumerate(zip(x_list, context_list, hints_list, audio_scale_list, multitalk_audio_list, multitalk_masks_list, x_should_calc)):
+                        if should_calc:
+                            x_list[i] = block(x, context = context, hints= hints, audio_scale= audio_scale, multitalk_audio = multitalk_audio, multitalk_masks =multitalk_masks, e= e0, **kwargs)
+                            del x
+                    context = hints = audio_embedding  = None
+
+        if self.enable_cache != None:
+            if joint_pass:
+                if all(x_should_calc):                        
                     for i, (x, ori, is_source) in enumerate(zip(x_list, ori_hidden_states, is_source_x)) :
                         if i == 0 or is_source and i != last_x_idx  :
                             self.previous_residual[i] = torch.sub(x, ori) 
@@ -1143,12 +1377,18 @@ class WanModel(ModelMixin, ConfigMixin):
                             self.previous_residual[i] = ori
                             torch.sub(x, ori, out=self.previous_residual[i]) 
                         ori_hidden_states[i] = None
-                        x , ori = None, None
                 else:
-                    residual = ori_hidden_states[0] # just to have a readable code
-                    torch.sub(x_list[0], ori_hidden_states[0], out=residual)
-                    self.previous_residual[x_id] = residual
-                residual, ori_hidden_states = None, None
+                    for i, (x, ori, is_source, should_calc) in enumerate(zip(x_list, ori_hidden_states, is_source_x, x_should_calc)) :
+                        if should_calc:
+                            self.previous_residual[i] = ori
+                            torch.sub(x, ori, out=self.previous_residual[i]) 
+                        ori_hidden_states[i] = None
+                x , ori = None, None
+            elif x_should_calc[0]:
+                residual = ori_hidden_states[0] # just to have a readable code
+                torch.sub(x_list[0], ori_hidden_states[0], out=residual)
+                self.previous_residual[x_id] = residual
+            residual, ori_hidden_states = None, None
 
         for i, x in enumerate(x_list):
             if chipmunk:
