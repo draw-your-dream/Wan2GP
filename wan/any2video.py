@@ -125,6 +125,9 @@ class WanAny2V:
         # offload.load_model_data(self.model, "c:/temp/Phantom-Wan-1.3B.pth")
         self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
         offload.change_dtype(self.model, dtype, True)
+        if self.model2 is not None:
+            self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
+            offload.change_dtype(self.model2, dtype, True)
         # offload.save_model(self.model, "wan2.1_text2video_1.3B_mbf16.safetensors", do_quantize= False, config_file_path=base_config_file, filter_sd=sd)
         # offload.save_model(self.model, "wan2.2_text2video_14B_high_mbf16.safetensors",  config_file_path=base_config_file)
         # offload.save_model(self.model, "wan2.2_text2video_14B_high_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)

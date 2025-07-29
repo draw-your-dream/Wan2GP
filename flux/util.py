@@ -16,11 +16,8 @@ from flux.modules.autoencoder import AutoEncoder, AutoEncoderParams
 from flux.modules.conditioner import HFEmbedder
 
 CHECKPOINTS_DIR = Path("checkpoints")
-CHECKPOINTS_DIR.mkdir(exist_ok=True)
-BFL_API_KEY = os.getenv("BFL_API_KEY")
 
-os.environ.setdefault("TRT_ENGINE_DIR", str(CHECKPOINTS_DIR / "trt_engines"))
-(CHECKPOINTS_DIR / "trt_engines").mkdir(exist_ok=True)
+BFL_API_KEY = os.getenv("BFL_API_KEY")
 
 
 def ensure_hf_auth():
