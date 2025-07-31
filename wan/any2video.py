@@ -88,7 +88,8 @@ class WanAny2V:
             tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
             shard_fn= None)
 
-        if hasattr(config, "clip_checkpoint"):
+        # base_model_type = "i2v2_2"
+        if hasattr(config, "clip_checkpoint") and not base_model_type in ["i2v_2_2"]:
             self.clip = CLIPModel(
                 dtype=config.clip_dtype,
                 device=self.device,
@@ -108,30 +109,35 @@ class WanAny2V:
         # with open(config_filename, 'r', encoding='utf-8') as f:
         #     config = json.load(f)
         # sd = safetensors2.torch_load_file(xmodel_filename)
-        # model_filename = "c:/temp/wan2.2t2v/high/diffusion_pytorch_model-00001-of-00006.safetensors"
+        # model_filename = "c:/temp/wan2.2i2v/low/diffusion_pytorch_model-00001-of-00006.safetensors"
         base_config_file = f"configs/{base_model_type}.json"
         forcedConfigPath = base_config_file if len(model_filename) > 1 else None
         # forcedConfigPath = base_config_file = f"configs/flf2v_720p.json"
         # model_filename[1] = xmodel_filename
-        model_filename2 = None
-        if self.transformer_switch:
-            model_filename2 = model_filename[1:] 
-            model_filename = model_filename[:1] + model_filename[2:]
-        self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
-        if model_filename2 is not None:
-            self.model2 = offload.fast_load_transformers_model(model_filename2, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
 
+        if self.transformer_switch:
+            shared_modules= {}
+            self.model = offload.fast_load_transformers_model(model_filename[:1], modules = model_filename[2:], modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath,  return_shared_modules= shared_modules)
+            self.model2 = offload.fast_load_transformers_model(model_filename[1:2], modules = shared_modules, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+            shared_modules = None
+        else:
+            self.model = offload.fast_load_transformers_model(model_filename, modelClass=WanModel,do_quantize= quantizeTransformer and not save_quantized, writable_tensors= False, defaultConfigPath=base_config_file , forcedConfigPath= forcedConfigPath)
+        
         # self.model = offload.load_model_data(self.model, xmodel_filename )
         # offload.load_model_data(self.model, "c:/temp/Phantom-Wan-1.3B.pth")
+
         self.model.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
         offload.change_dtype(self.model, dtype, True)
         if self.model2 is not None:
             self.model2.lock_layers_dtypes(torch.float32 if mixed_precision_transformer else dtype)
             offload.change_dtype(self.model2, dtype, True)
+
         # offload.save_model(self.model, "wan2.1_text2video_1.3B_mbf16.safetensors", do_quantize= False, config_file_path=base_config_file, filter_sd=sd)
-        # offload.save_model(self.model, "wan2.2_text2video_14B_high_mbf16.safetensors",  config_file_path=base_config_file)
-        # offload.save_model(self.model, "wan2.2_text2video_14B_high_quanto_mfp16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.2_image2video_14B_low_mbf16.safetensors",  config_file_path=base_config_file)
+        # offload.save_model(self.model, "wan2.2_image2video_14B_low_quanto_mbf16_int8.safetensors", do_quantize=True, config_file_path=base_config_file)
         self.model.eval().requires_grad_(False)
+        if self.model2 is not None:
+            self.model2.eval().requires_grad_(False)
         if save_quantized:
             from wgp import save_quantized_model
             save_quantized_model(self.model, model_type, model_filename[0], dtype, base_config_file)
@@ -480,8 +486,11 @@ class WanAny2V:
             any_end_frame = False
             if input_frames != None:
                 _ , preframes_count, height, width = input_frames.shape
-                lat_h, lat_w = height // self.vae_stride[1], width // self.vae_stride[2]                                    
-                clip_context = self.clip.visual([input_frames[:, -1:]]) if model_type != "flf2v_720p" else self.clip.visual([input_frames[:, -1:], input_frames[:, -1:]])
+                lat_h, lat_w = height // self.vae_stride[1], width // self.vae_stride[2]
+                if hasattr(self, "clip"):                                   
+                    clip_context = self.clip.visual([input_frames[:, -1:]]) if model_type != "flf2v_720p" else self.clip.visual([input_frames[:, -1:], input_frames[:, -1:]])
+                else:
+                    clip_context = None
                 input_frames = input_frames.to(device=self.device).to(dtype= self.VAE_dtype)
                 enc =  torch.concat( [input_frames, torch.zeros( (3, frame_num-preframes_count, height, width), 
                                      device=self.device, dtype= self.VAE_dtype)], 
@@ -513,19 +522,24 @@ class WanAny2V:
                     self.patch_size[2] * self.patch_size[2])
                 h = lat_h * self.vae_stride[1]
                 w = lat_w * self.vae_stride[2]
-                clip_image_size = self.clip.model.image_size
                 img_interpolated = resize_lanczos(image_start, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device) #, self.dtype
-                image_start = resize_lanczos(image_start, clip_image_size, clip_image_size)
-                image_start = image_start.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
-                color_reference_frame = image_start.clone()
+                color_reference_frame = img_interpolated.clone()
                 if image_end!= None:
                     img_interpolated2 = resize_lanczos(image_end, h, w).sub_(0.5).div_(0.5).unsqueeze(0).transpose(0,1).to(self.device) #, self.dtype
-                    image_end = resize_lanczos(image_end, clip_image_size, clip_image_size)
-                    image_end = image_end.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
-                if model_type == "flf2v_720p":                    
-                    clip_context = self.clip.visual([image_start[:, None, :, :], image_end[:, None, :, :] if image_end != None else image_start[:, None, :, :]])
+
+                if hasattr(self, "clip"):                                   
+                    clip_image_size = self.clip.model.image_size
+                    image_start = resize_lanczos(image_start, clip_image_size, clip_image_size)
+                    image_start = image_start.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
+                    if image_end!= None:
+                        image_end = resize_lanczos(image_end, clip_image_size, clip_image_size)
+                        image_end = image_end.sub_(0.5).div_(0.5).to(self.device) #, self.dtype
+                    if model_type == "flf2v_720p":                    
+                        clip_context = self.clip.visual([image_start[:, None, :, :], image_end[:, None, :, :] if image_end != None else image_start[:, None, :, :]])
+                    else:
+                        clip_context = self.clip.visual([image_start[:, None, :, :]])
                 else:
-                    clip_context = self.clip.visual([image_start[:, None, :, :]])
+                    clip_context = None
 
                 if any_end_frame:
                     enc= torch.concat([
@@ -563,7 +577,9 @@ class WanAny2V:
                 extended_overlapped_latents = lat_y[:, :overlapped_latents_frames_num].clone().unsqueeze(0)
             y = torch.concat([msk, lat_y])
             lat_y = None
-            kwargs.update({'clip_fea': clip_context, 'y': y})
+            kwargs.update({ 'y': y})
+            if not clip_context is None:
+                kwargs.update({'clip_fea': clip_context})
 
         # Recam Master
         if target_camera != None:
@@ -883,7 +899,7 @@ class WanAny2V:
             videos = torch.cat([video[:,:1] for video in videos], dim=1) if len(videos) > 1 else videos[0][:,:1]
         else:
             videos = videos[0] # return only first video
-        if color_correction_strength > 0:
+        if color_correction_strength > 0 and prefix_frames_count > 0:
             if vace and False:
                 # videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "progressive_blend").squeeze(0)
                 videos = match_and_blend_colors_with_mask(videos.unsqueeze(0), input_frames[0].unsqueeze(0), input_masks[0][:1].unsqueeze(0), color_correction_strength,copy_mode= "reference").squeeze(0)

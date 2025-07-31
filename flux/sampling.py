@@ -227,7 +227,7 @@ def prepare_kontext(
 
     img_cond_seq = None
     img_cond_seq_ids = None
-
+    if img_cond_list == None: img_cond_list = []
     for cond_no, img_cond in enumerate(img_cond_list): 
         width, height = img_cond.size
         aspect_ratio = width / height

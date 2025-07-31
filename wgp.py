@@ -50,8 +50,8 @@ global_queue_ref = []
 AUTOSAVE_FILENAME = "queue.zip"
 PROMPT_VARS_MAX = 10
 
-target_mmgp_version = "3.5.1"
-WanGP_version = "7.4"
+target_mmgp_version = "3.5.3"
+WanGP_version = "7.5"
 settings_version = 2.23
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
@@ -1581,7 +1581,7 @@ def _parse_args():
 
 def get_lora_dir(model_type):
     model_family = get_model_family(model_type)
-    i2v = test_class_i2v(model_type)
+    i2v = test_class_i2v(model_type) and not get_base_model_type(model_type) == "i2v_2_2"
     if model_family == "wan":
         lora_dir =args.lora_dir
         if i2v and len(lora_dir)==0:
@@ -1691,7 +1691,8 @@ for path in  ["wan2.1_Vace_1.3B_preview_bf16.safetensors", "sky_reels2_diffusion
 "sky_reels2_diffusion_forcing_720p_14B_quanto_int8.safetensors", "sky_reels2_diffusion_forcing_720p_14B_quanto_fp16_int8.safetensors", "wan2.1_image2video_480p_14B_bf16.safetensors", "wan2.1_image2video_480p_14B_quanto_int8.safetensors",
 "wan2.1_image2video_720p_14B_quanto_int8.safetensors", "wan2.1_image2video_720p_14B_quanto_fp16_int8.safetensors", "wan2.1_image2video_720p_14B_bf16.safetensors",
 "wan2.1_text2video_14B_bf16.safetensors", "wan2.1_text2video_14B_quanto_int8.safetensors",
-"wan2.1_Vace_14B_mbf16.safetensors", "wan2.1_Vace_14B_quanto_mbf16_int8.safetensors", "wan2.1_FLF2V_720p_14B_quanto_int8.safetensors", "wan2.1_FLF2V_720p_14B_bf16.safetensors",  "wan2.1_FLF2V_720p_14B_fp16.safetensors", "wan2.1_Vace_1.3B_mbf16.safetensors", "wan2.1_text2video_1.3B_bf16.safetensors"
+"wan2.1_Vace_14B_mbf16.safetensors", "wan2.1_Vace_14B_quanto_mbf16_int8.safetensors", "wan2.1_FLF2V_720p_14B_quanto_int8.safetensors", "wan2.1_FLF2V_720p_14B_bf16.safetensors",  "wan2.1_FLF2V_720p_14B_fp16.safetensors", "wan2.1_Vace_1.3B_mbf16.safetensors", "wan2.1_text2video_1.3B_bf16.safetensors",
+"ltxv_0.9.7_13B_dev_bf16.safetensors"
 ]:
     if Path(os.path.join("ckpts" , path)).is_file():
         print(f"Removing old version of model '{path}'. A new version of this model will be downloaded next time you use it.")
@@ -1712,7 +1713,7 @@ modules_files = {
 base_types = ["multitalk", "fantasy", "vace_14B", "vace_multitalk_14B",
                 "t2v_1.3B", "t2v", "vace_1.3B", "phantom_1.3B", "phantom_14B", 
                 "recam_1.3B",  "sky_df_1.3B", "sky_df_14B",
-                "i2v", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "ltxv_13B",
+                "i2v", "i2v_2_2", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "ltxv_13B",
                 "hunyuan", "hunyuan_i2v", "hunyuan_custom", "hunyuan_custom_audio", "hunyuan_custom_edit", "hunyuan_avatar", "flux"
                 ] 
 
@@ -1792,7 +1793,7 @@ def get_model_family(model_type, for_ui = False):
 
 def test_class_i2v(model_type):
     model_type = get_base_model_type(model_type)
-    return model_type in ["i2v", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk" ] #"hunyuan_i2v",
+    return model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk" ] #"hunyuan_i2v",
 
 def test_vace_module(model_type):
     model_type = get_base_model_type(model_type)
@@ -2630,9 +2631,8 @@ def load_wan_model(model_filename, model_type, base_model_type, model_def, quant
     )
 
     pipe = {"transformer": wan_model.model, "text_encoder" : wan_model.text_encoder.model, "vae": wan_model.vae.model }
-    if wan_model.model2 is not None:
+    if hasattr(wan_model,"model2") and wan_model.model2 is not None:
         pipe["transformer2"] = wan_model.model2
-
     if hasattr(wan_model, "clip"):
         pipe["text_encoder_2"] = wan_model.clip.model
     return wan_model, pipe
@@ -2803,9 +2803,8 @@ def load_models(model_type):
 
     if "transformer2" in pipe:
         loras_transformer += ["transformer2"]        
-        if profile in [2,4]:
+        if profile in [3,4]:
             kwargs["pinnedMemory"] = ["transformer", "transformer2"]
-
 
     global prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer
     if server_config.get("enhancer_enabled", 0) == 1:
@@ -3317,11 +3316,15 @@ def select_video(state, input_file_list, event_data: gr.EventData):
                 if video_length != frames_count: video_length_summary += f"real: {frames_count} frames, "
                 video_length_summary += f"{frames_count/fps:.1f}s, {round(fps)} fps)"
             video_guidance_scale = configs.get("guidance_scale", None)
+            video_guidance2_scale = configs.get("guidance2_scale", None)
+            video_switch_threshold = configs.get("switch_threshold", 0)
             video_embedded_guidance_scale = configs.get("embedded_guidance_scale ", None)
             if model_family in ["hunyuan", "flux"]:
                 video_guidance_scale = video_embedded_guidance_scale
                 video_guidance_label = "Embedded Guidance Scale"
             else:
+                if video_switch_threshold > 0:
+                    video_guidance_scale = f"{video_guidance_scale} (High Noise), {video_guidance2_scale} (Low Noise) with Switch at Noise Level {video_switch_threshold}"
                 video_guidance_label = "Guidance"
             video_flow_shift = configs.get("flow_shift", None)
             video_video_guide_outpainting = configs.get("video_guide_outpainting", "")
@@ -4232,15 +4235,15 @@ def generate_video(
             loras_selected = transformer_loras_filenames + loras_selected
             loras_list_mult_choices_nums = transformer_loras_multipliers + loras_list_mult_choices_nums
             loras_slists = transformer_loras_multipliers + loras_slists
-        trans_list = [trans]
-        if trans2 is not None: trans_list += [trans2] 
-        for trans_item in trans_list:
-            offload.load_loras_into_model(trans_item, loras_selected, loras_list_mult_choices_nums, activate_all_loras=True, preprocess_sd=get_loras_preprocessor(trans, base_model_type), pinnedLora=pinnedLora, split_linear_modules_map = split_linear_modules_map) 
-            errors = trans._loras_errors
-            if len(errors) > 0:
-                error_files = [msg for _ ,  msg  in errors]
-                raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
-        trans_item = trans_list = None
+
+        offload.load_loras_into_model(trans , loras_selected, loras_list_mult_choices_nums, activate_all_loras=True, preprocess_sd=get_loras_preprocessor(trans, base_model_type), pinnedLora=pinnedLora, split_linear_modules_map = split_linear_modules_map) 
+        errors = trans._loras_errors
+        if len(errors) > 0:
+            error_files = [msg for _ ,  msg  in errors]
+            raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
+        if trans2 is not None: 
+            offload.sync_models_loras(trans, trans2)
+        
     seed = None if seed == -1 else seed
     # negative_prompt = "" # not applicable in the inference
     original_filename = model_filename 
@@ -4619,7 +4622,9 @@ def generate_video(
                     if len(extra_process_list) == 1:
                         status_info += " and " + processes_names[extra_process_list[0]]
                     elif len(extra_process_list) == 2:
-                        status_info +=  ", " + processes_names[extra_process_list[0]] + " and " + processes_names[extra_process_list[1]]                    
+                        status_info +=  ", " + processes_names[extra_process_list[0]] + " and " + processes_names[extra_process_list[1]]
+                    if preprocess_type2 is not None:
+                            context_scale = [ control_net_weight /2, control_net_weight2 /2]
                     send_cmd("progress", [0, get_latest_status(state, status_info)])
                     video_guide_processed, video_mask_processed = preprocess_video_with_mask(video_guide, video_mask, height=image_size[0], width = image_size[1], max_frames= len(keep_frames_parsed) , start_frame = guide_start_frame, fit_canvas = sample_fit_canvas, target_fps = fps,  process_type = preprocess_type, expand_scale = mask_expand, RGB_Mask = True, negate_mask = "N" in video_prompt_type, process_outside_mask = process_outside_mask, outpainting_dims = outpainting_dims, proc_no =1 )
                     if preprocess_type2 != None:
@@ -4768,6 +4773,7 @@ def generate_video(
                 remove_temp_filenames(temp_filenames_list)
                 offloadobj.unload_all()
                 offload.unload_loras_from_model(trans)
+                if trans is not None: offload.unload_loras_from_model(trans2) 
                 # if compile:
                 #     cache_size = torch._dynamo.config.cache_size_limit                                      
                 #     torch.compiler.reset()

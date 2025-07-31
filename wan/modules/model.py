@@ -789,7 +789,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
             sd = new_sd
         from wgp import test_class_i2v 
-        if not test_class_i2v(model_type):
+        if not test_class_i2v(model_type) or model_type in ["i2v_2_2"]:
             new_sd = {}
             # convert loras for i2v to t2v
             for k,v in sd.items():
@@ -842,7 +842,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         super().__init__()
 
-        assert model_type in ['t2v', 'i2v']
+        assert model_type in ['t2v', 'i2v', 'i2v2_2']
         self.model_type = model_type
 
         self.patch_size = patch_size
@@ -889,7 +889,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # blocks
         if vace_layers == None:
-            cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
+            cross_attn_type = 't2v_cross_attn' if model_type in ['t2v','i2v2_2'] else 'i2v_cross_attn'
             self.blocks = nn.ModuleList([
                 WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
                                 window_size, qk_norm, cross_attn_norm, eps, block_no =i, output_dim=multitalk_output_dim, norm_input_visual=norm_input_visual)
