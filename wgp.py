@@ -5884,7 +5884,7 @@ def prepare_inputs_dict(target, inputs, model_type = None, model_filename = None
         pop += ["MMAudio_setting", "MMAudio_prompt", "MMAudio_neg_prompt"]
 
     video_prompt_type = inputs["video_prompt_type"]
-    if not base_model_type in ["tv2"]:
+    if not base_model_type in ["t2v"]:
         pop += ["denoising_strength"]
 
     if not server_config.get("enhancer_enabled", 0) == 1:
